@@ -1,0 +1,86 @@
+# .gk.yaml — gk 프로젝트 설정 (팀 공유)
+base_branch: main
+branch:
+    protected:
+        - main
+        - develop
+    patterns:
+        - ^(feat|fix|chore|docs|refactor|test|perf|build|ci|revert)/[a-z0-9._-]+
+commit:
+    types: [feat, fix, chore, docs, style, refactor, perf, test, build, ci, revert]
+    scope_required: false
+    max_subject_length: 72
+preflight:
+    steps:
+        - name: commit-lint
+          command: commit-lint
+        - name: branch-check
+          command: branch-check
+        - name: no-conflict
+          command: no-conflict
+        - name: test
+          command: make test
+ai:
+    commit:
+        deny_paths:
+            - .env
+            - .env.*
+            - '*.pem'
+            - '*.key'
+            - '*.crt'
+            - '*.cer'
+            - '*.p12'
+            - '*.pfx'
+            - '*.jks'
+            - '*.keystore'
+            - '*.kdbx'
+            - id_rsa*
+            - id_dsa*
+            - id_ecdsa*
+            - id_ed25519*
+            - '*.ppk'
+            - credentials.json
+            - service-account*.json
+            - firebase-adminsdk*.json
+            - gcp-*-key*.json
+            - .netrc
+            - _netrc
+            - .npmrc
+            - .pypirc
+            - .docker/config.json
+            - .git-credentials
+            - .aws/credentials
+            - .aws/config
+            - .kube/config
+            - kubeconfig
+            - '*.kubeconfig'
+            - '*.tfstate'
+            - '*.tfstate.*'
+            - terraform.tfvars
+            - '*.auto.tfvars'
+            - .vault_pass*
+            - vault-token*
+            - vault.yml
+            - vault.yaml
+            - '*-vault.yml'
+            - '*-vault.yaml'
+            - secrets.dec.yaml
+            - secrets.dec.yml
+            - '*.sqlite'
+            - '*.sqlite3'
+            - '*.db'
+            - '*.dump'
+            - dump.sql
+            - '*.pyc'
+            - '*.pyo'
+            - __pycache__
+            - __pycache__/*
+            - '*.class'
+        trailer: false
+        audit: false
+
+# policies: (commented-out, opt-in)
+#   secret_patterns:
+#     enabled: true
+#     mode: git
+#     redact: true

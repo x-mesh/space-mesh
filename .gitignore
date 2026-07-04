@@ -1,0 +1,53 @@
+# Language: Rust
+target/
+
+# Security
+.env
+.env.*
+*.pem
+id_rsa*
+credentials.json
+*.pfx
+*.kdbx
+*.keystore
+service-account*.json
+
+# IDE/Editor
+.idea/
+.vscode/
+.cursor/
+.claude/
+.kiro/
+.xm/
+.omc/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Compiled artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.class
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.cover
+*.coverage
+coverage/
+.tox/
+.cache/
+
+# Language: Swift
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserstate
