@@ -182,6 +182,20 @@ pub const CATEGORIES: &[CategoryDef] = &[
         recreate_command: "",
         recreate_cost: "low",
     },
+    CategoryDef {
+        id: "ai-agent-cache",
+        title: "AI 에이전트 캐시·세션",
+        dir_names: &[".claude", ".cursor", ".codex", ".aider", ".gemini", ".kiro"],
+        parent_markers: &[],
+        inner_markers: &[],
+        require_marker: false,
+        safety: "warn",
+        description: "AI 코딩 에이전트(Claude Code, Cursor 등)의 설정·세션 기록·캐시입니다. \
+            세션에서 대화 기록과 트랜스크립트가 계속 쌓여 커질 수 있습니다. \
+            설정과 세션 기록은 지우면 재생성되지 않으니 내용을 확인한 뒤 정리하세요.",
+        recreate_command: "",
+        recreate_cost: "high",
+    },
 ];
 
 #[derive(Debug)]
@@ -275,12 +289,19 @@ mod tests {
         // 중첩 node_modules — 바깥 것만 잡혀야 함
         fs::create_dir_all(tmp.join("proj-js/node_modules/pkg/node_modules")).unwrap();
 
+        // AI 에이전트 캐시 (.claude) — 마커 불요, safety=warn
+        fs::create_dir_all(tmp.join("proj-rs/.claude/projects")).unwrap();
+        fs::write(tmp.join("proj-rs/.claude/projects/log.jsonl"), vec![0u8; 4000]).unwrap();
+
         let result = scan(&tmp, ScanOptions::default()).unwrap();
         let hits = find_categories(&result.root, &tmp);
 
         let ids: Vec<&str> = hits.iter().map(|h| h.def.id).collect();
         assert!(ids.contains(&"cargo-target"), "{:?}", ids);
         assert!(ids.contains(&"node-modules"), "{:?}", ids);
+        let agent = hits.iter().find(|h| h.def.id == "ai-agent-cache").unwrap();
+        assert_eq!(agent.def.safety, "warn");
+        assert!(agent.path.ends_with("proj-rs/.claude"));
         assert_eq!(
             ids.iter().filter(|&&i| i == "node-modules").count(),
             1,
