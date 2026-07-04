@@ -37,9 +37,17 @@ final class BackgroundAgent: ObservableObject {
             installLaunchAgent(root: settings.watchedRoot, interval: settings.interval)
         case .live:
             requestNotificationAuth()
+            growthAlertBytes =
+                settings.growthAlertGiB > 0
+                ? UInt64(settings.growthAlertGiB * 1_073_741_824) : 0
             startLiveWatch(root: settings.watchedRoot, budgetGiB: settings.budgetGiB)
         }
     }
+
+    /// Growth Watch 임계 (bytes). 0이면 끔.
+    private var growthAlertBytes: UInt64 = 0
+    /// 마지막으로 성장 알림을 보낸 스냅샷 id — 같은 스냅샷 쌍으로 중복 알림 방지.
+    private var lastGrowthNotifiedSnapId: Int64 = 0
 
     // MARK: - 주기 스냅샷 (launchd LaunchAgent)
 
@@ -196,7 +204,8 @@ final class BackgroundAgent: ObservableObject {
         let root = watchRoot
         let handle = try? await Task.detached(priority: .background) {
             // 스냅샷도 저장해 '변화' 탭에 축적.
-            try scanAndSave(path: root, minFileMib: 50, dbPath: AppModel.dbPath)
+            try scanAndSave(
+                path: root, minFileMib: AppModel.scanRecordMinFileMib, dbPath: AppModel.dbPath)
         }.value
         isRecomputing = false
         guard let handle else {
@@ -211,6 +220,47 @@ final class BackgroundAgent: ObservableObject {
         if budgetBytes > 0 && total > budgetBytes {
             notifyBudget(total: total, budget: budgetBytes, root: root)
         }
+        await checkGrowth(root: root)
+    }
+
+    /// Growth Watch — 직전 스냅샷 대비 증가가 임계를 넘으면 주범 경로와 함께 알림.
+    /// 스냅샷·diff 인프라를 그대로 재사용한다 (recompute가 방금 새 스냅샷을 저장했음).
+    private func checkGrowth(root: String) async {
+        guard growthAlertBytes > 0 else { return }
+        let db = AppModel.dbPath
+        let threshold = growthAlertBytes
+        let alreadyNotified = lastGrowthNotifiedSnapId
+
+        let result: (newId: Int64, growth: Int64, culprit: String?)? = await Task.detached(
+            priority: .utility
+        ) {
+            guard let snaps = try? listSnapshots(dbPath: db, rootPath: root), snaps.count >= 2
+            else { return nil }
+            let newest = snaps[0]
+            guard newest.scanId != alreadyNotified else { return nil }
+            guard let diff = try? openDiff(dbPath: db, oldId: snaps[1].scanId, newId: newest.scanId)
+            else { return nil }
+            let totals = diff.totals(path: [])
+            guard totals.delta > 0, UInt64(totals.delta) >= threshold else { return nil }
+            // 주범: |delta| 상위 1개 (임계의 1/10 이상만 의미 있는 귀속으로 간주).
+            let minCulpritMib = max(64, threshold / 1_048_576 / 10)
+            let culprit = diff.culprits(minDeltaMib: minCulpritMib).first
+            let label = culprit.map { "\($0.path) (+\(humanBytes(UInt64(max(0, $0.delta)))))" }
+            return (newest.scanId, totals.delta, label)
+        }.value
+
+        guard let r = result else { return }
+        lastGrowthNotifiedSnapId = r.newId
+        let content = UNMutableNotificationContent()
+        content.title = "디스크 급증 감지"
+        content.body =
+            "\(URL(fileURLWithPath: root).lastPathComponent): 직전 스냅샷 대비 +\(humanBytes(UInt64(r.growth)))"
+            + (r.culprit.map { " — 주범: \($0)" } ?? "")
+        content.sound = .default
+        let req = UNNotificationRequest(
+            identifier: "growth-\(root)-\(r.newId)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+        status = "급증 감지 +\(humanBytes(UInt64(r.growth))) · \(shortNow())"
     }
 
     // MARK: - 알림

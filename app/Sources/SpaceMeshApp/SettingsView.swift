@@ -44,6 +44,16 @@ struct SettingsView: View {
                         .foregroundStyle(Theme.textDim)
                 }
                 .padding(.leading, 4)
+                HStack(spacing: 10) {
+                    InstrumentLabel(text: "급증")
+                    TextField("GiB", value: $settings.growthAlertGiB, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                    Text("직전 스냅샷 대비 이만큼 늘면 주범과 함께 알림 (0 = 끔)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textDim)
+                }
+                .padding(.leading, 4)
             }
 
             // 감시 대상
@@ -88,6 +98,12 @@ struct SettingsView: View {
         .onChange(of: settings.mode) { agent.apply(settings) }
         .onChange(of: settings.interval) {
             if settings.mode == .periodic { agent.apply(settings) }
+        }
+        .onChange(of: settings.budgetGiB) {
+            if settings.mode == .live { agent.apply(settings) }
+        }
+        .onChange(of: settings.growthAlertGiB) {
+            if settings.mode == .live { agent.apply(settings) }
         }
     }
 

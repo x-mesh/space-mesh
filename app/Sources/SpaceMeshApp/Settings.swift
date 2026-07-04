@@ -73,6 +73,11 @@ final class AppSettings: ObservableObject {
     @Published var budgetGiB: Double {
         didSet { defaults.set(budgetGiB, forKey: "budgetGiB") }
     }
+    /// Growth Watch — 직전 스냅샷 대비 증가가 이 값(GiB)을 넘으면 주범과 함께 알림.
+    /// 0이면 끔.
+    @Published var growthAlertGiB: Double {
+        didSet { defaults.set(growthAlertGiB, forKey: "growthAlertGiB") }
+    }
 
     private init() {
         mode = WatchMode(rawValue: defaults.string(forKey: "watchMode") ?? "") ?? .off
@@ -80,5 +85,8 @@ final class AppSettings: ObservableObject {
             PeriodicInterval(rawValue: defaults.string(forKey: "periodicInterval") ?? "") ?? .daily
         watchedRoot = defaults.string(forKey: "watchedRoot") ?? NSHomeDirectory()
         budgetGiB = defaults.double(forKey: "budgetGiB")
+        growthAlertGiB =
+            defaults.object(forKey: "growthAlertGiB") == nil
+            ? 5.0 : defaults.double(forKey: "growthAlertGiB")
     }
 }
