@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 space-scanner = { path = "../scanner" }
 rayon = { workspace = true }
-blake3 = "1"
+# mmap+rayon: 대용량 파일 전체 해시를 멀티스레드로 (PERF-002)
+blake3 = { version = "1", features = ["mmap", "rayon"] }
