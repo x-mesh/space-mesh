@@ -52,7 +52,10 @@ final class AppModel: ObservableObject {
     nonisolated static let staleAgeDays: UInt32 = 180
 
     /// 스캔 시 개별 파일로 기록하는 최소 크기(MiB) — 중복 검사 트리 재사용 조건의 기준.
-    nonisolated static let scanRecordMinFileMib: UInt64 = 50
+    /// DuplicatesView 기본값(10MiB)과 맞춰 기본 중복 검색이 재스캔 없이 트리를
+    /// 재사용하게 한다. 실측(1.86M files): 50→10 하향 비용은 스캔 시간 동일,
+    /// big_files 283→2,348행, DB 크기 동일(14M) — 사실상 0.
+    nonisolated static let scanRecordMinFileMib: UInt64 = 10
 
     /// 스냅샷 DB 경로 (~/Library/Application Support/space-mesh/snapshots.db).
     nonisolated static var dbPath: String {
