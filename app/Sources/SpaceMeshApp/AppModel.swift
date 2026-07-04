@@ -18,6 +18,8 @@ final class AppModel: ObservableObject {
     @Published var bigFiles: [BigFile] = []
     /// 트리 전체의 "크고 오래 방치된" 파일 top-N (읽기 전용 랭킹).
     @Published var staleFiles: [BigFile] = []
+    /// 회수 가능 합계 (툴바 상시 노출용, git 조회 없는 경량 계산).
+    @Published var reclaimSummary: ReclaimSummary?
     @Published var stats: ScanStatsInfo?
     @Published var scanSeconds: Double?
     @Published var scanStartedAt = Date()
@@ -40,6 +42,9 @@ final class AppModel: ObservableObject {
                 self.indexPath = []
                 self.breadcrumb = []
                 self.staleFiles = handle.staleFiles(limit: 20, minAgeDays: Self.staleAgeDays)
+                self.reclaimSummary = await Task.detached(priority: .utility) {
+                    handle.reclaimSummary()
+                }.value
                 self.reload()
             } catch {
                 self.errorMessage = "\(error)"

@@ -732,6 +732,12 @@ public protocol ScanHandleProtocol: AnyObject, Sendable {
     func nodeAt(indexPath: [UInt32]) throws  -> NodeInfo
     
     /**
+     * 카테고리 히트의 회수 가능 합계 — 상시 노출(툴바)용 경량 조회.
+     * 트리 워크 + 마커 확인만 수행한다 (프로젝트별 git 조회 없음).
+     */
+    func reclaimSummary()  -> ReclaimSummary
+    
+    /**
      * 트리 전체에서 "크고 오래 방치된" 파일 top-N (점수 = allocated × 방치일).
      * min_age_days 이상 수정이 없던 파일만 포함한다. 랭킹은 읽기 전용 —
      * 삭제는 UI의 기존 안전망(가드 + 휴지통 + undo)을 거친다.
@@ -890,6 +896,17 @@ open func nodeAt(indexPath: [UInt32])throws  -> NodeInfo  {
     return try  FfiConverterTypeNodeInfo_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
     uniffi_space_ffi_fn_method_scanhandle_node_at(self.uniffiClonePointer(),
         FfiConverterSequenceUInt32.lower(indexPath),$0
+    )
+})
+}
+    
+    /**
+     * 카테고리 히트의 회수 가능 합계 — 상시 노출(툴바)용 경량 조회.
+     * 트리 워크 + 마커 확인만 수행한다 (프로젝트별 git 조회 없음).
+     */
+open func reclaimSummary() -> ReclaimSummary  {
+    return try!  FfiConverterTypeReclaimSummary_lift(try! rustCall() {
+    uniffi_space_ffi_fn_method_scanhandle_reclaim_summary(self.uniffiClonePointer(),$0
     )
 })
 }
@@ -2117,6 +2134,99 @@ public func FfiConverterTypeNodeInfo_lower(_ value: NodeInfo) -> RustBuffer {
 }
 
 
+/**
+ * 툴바 요약용 회수 가능 합계 — categories()와 달리 git idle 조회가 없어 즉시.
+ */
+public struct ReclaimSummary {
+    /**
+     * safety == "safe" 히트 합계 (원클릭 정리 가능).
+     */
+    public var safeTotal: UInt64
+    /**
+     * safety == "warn" 히트 합계 (검토 필요).
+     */
+    public var warnTotal: UInt64
+    public var hitCount: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * safety == "safe" 히트 합계 (원클릭 정리 가능).
+         */safeTotal: UInt64, 
+        /**
+         * safety == "warn" 히트 합계 (검토 필요).
+         */warnTotal: UInt64, hitCount: UInt32) {
+        self.safeTotal = safeTotal
+        self.warnTotal = warnTotal
+        self.hitCount = hitCount
+    }
+}
+
+#if compiler(>=6)
+extension ReclaimSummary: Sendable {}
+#endif
+
+
+extension ReclaimSummary: Equatable, Hashable {
+    public static func ==(lhs: ReclaimSummary, rhs: ReclaimSummary) -> Bool {
+        if lhs.safeTotal != rhs.safeTotal {
+            return false
+        }
+        if lhs.warnTotal != rhs.warnTotal {
+            return false
+        }
+        if lhs.hitCount != rhs.hitCount {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(safeTotal)
+        hasher.combine(warnTotal)
+        hasher.combine(hitCount)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReclaimSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReclaimSummary {
+        return
+            try ReclaimSummary(
+                safeTotal: FfiConverterUInt64.read(from: &buf), 
+                warnTotal: FfiConverterUInt64.read(from: &buf), 
+                hitCount: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ReclaimSummary, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.safeTotal, into: &buf)
+        FfiConverterUInt64.write(value.warnTotal, into: &buf)
+        FfiConverterUInt32.write(value.hitCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReclaimSummary_lift(_ buf: RustBuffer) throws -> ReclaimSummary {
+    return try FfiConverterTypeReclaimSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReclaimSummary_lower(_ value: ReclaimSummary) -> RustBuffer {
+    return FfiConverterTypeReclaimSummary.lower(value)
+}
+
+
 public struct ScanStatsInfo {
     public var totalFiles: UInt64
     public var totalDirs: UInt64
@@ -3045,6 +3155,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_node_at() != 21162) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_method_scanhandle_reclaim_summary() != 64489) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_stale_files() != 62394) {

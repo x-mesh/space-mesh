@@ -119,6 +119,28 @@ struct ContentView: View {
 
             if let stats = model.stats, let secs = model.scanSeconds, !model.isScanning {
                 HStack(spacing: 12) {
+                    // Reclaimable now — 회수 가능 합계 상시 노출, 클릭 시 산출물 탭으로.
+                    if let reclaim = model.reclaimSummary, reclaim.safeTotal > 0 {
+                        Button {
+                            mode = .categories
+                        } label: {
+                            VStack(alignment: .trailing, spacing: 0) {
+                                Text(humanBytes(reclaim.safeTotal))
+                                    .font(.dataCell)
+                                    .foregroundStyle(Theme.accent)
+                                Text("RECLAIM")
+                                    .font(.system(size: 7.5, weight: .semibold))
+                                    .tracking(1.0)
+                                    .foregroundStyle(Theme.textFaint)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help(
+                            "안전 회수 가능 합계 (빌드 산출물 \(reclaim.hitCount)곳"
+                                + (reclaim.warnTotal > 0
+                                    ? ", 검토 필요 \(humanBytes(reclaim.warnTotal)) 별도" : "")
+                                + ") — 클릭해 이동")
+                    }
                     readoutItem(value: stats.totalFiles.formatted(), label: "FILES")
                     readoutItem(value: stats.totalDirs.formatted(), label: "DIRS")
                     readoutItem(value: String(format: "%.1fs", secs), label: "SCAN")

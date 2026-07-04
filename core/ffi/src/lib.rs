@@ -381,8 +381,37 @@ pub struct CategoryHitInfo {
     pub idle_days: Option<u64>,
 }
 
+/// 툴바 요약용 회수 가능 합계 — categories()와 달리 git idle 조회가 없어 즉시.
+#[derive(uniffi::Record)]
+pub struct ReclaimSummary {
+    /// safety == "safe" 히트 합계 (원클릭 정리 가능).
+    pub safe_total: u64,
+    /// safety == "warn" 히트 합계 (검토 필요).
+    pub warn_total: u64,
+    pub hit_count: u32,
+}
+
 #[uniffi::export]
 impl ScanHandle {
+    /// 카테고리 히트의 회수 가능 합계 — 상시 노출(툴바)용 경량 조회.
+    /// 트리 워크 + 마커 확인만 수행한다 (프로젝트별 git 조회 없음).
+    pub fn reclaim_summary(&self) -> ReclaimSummary {
+        let hits = space_rules::categories::find_categories(&self.root, &self.root_path);
+        let mut safe_total = 0u64;
+        let mut warn_total = 0u64;
+        for h in &hits {
+            match h.def.safety {
+                "safe" => safe_total += h.allocated_size,
+                _ => warn_total += h.allocated_size,
+            }
+        }
+        ReclaimSummary {
+            safe_total,
+            warn_total,
+            hit_count: hits.len() as u32,
+        }
+    }
+
     /// 스캔된 트리에서 잘 알려진 산출물 카테고리(node_modules, cargo target 등)를 찾는다.
     /// 트리는 메모리에 있어 즉시 반환된다 (마커 확인만 파일시스템 조회).
     pub fn categories(&self) -> Vec<CategoryHitInfo> {
