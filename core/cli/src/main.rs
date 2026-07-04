@@ -49,6 +49,26 @@ struct Args {
     /// Stale files 섹션에서 방치로 간주할 최소 경과일
     #[arg(long, default_value_t = 180)]
     stale_days: u64,
+
+    /// 트리를 ncdu -f 호환 JSON으로 출력 (전체 깊이; 임계 미만 파일은 잔여 의사항목)
+    #[arg(long, conflicts_with = "json")]
+    ncdu: bool,
+
+    /// 중복 파일 그룹 출력 (크기→부분해시→전체해시, 첫 파일 = 보존 추천본)
+    #[arg(long)]
+    dups: bool,
+
+    /// --dups에서 검사할 최소 파일 크기 (MiB)
+    #[arg(long, default_value_t = 10)]
+    min_dup_mib: u64,
+
+    /// 스캔 후 빌드 산출물 카테고리(node_modules, target 등) 히트 출력
+    #[arg(long)]
+    categories: bool,
+
+    /// 설치된 도구의 공식 정리 커맨드 제안 출력 (스캔 없음, dry-run 실행)
+    #[arg(long)]
+    advice: bool,
 }
 
 fn main() {
@@ -62,6 +82,14 @@ fn main() {
         one_filesystem: args.one_filesystem,
     };
 
+    if args.advice {
+        run_advice(&args);
+        return;
+    }
+    if args.dups {
+        run_dups(&args);
+        return;
+    }
     if args.diff {
         run_diff(&args);
         return;
@@ -130,6 +158,15 @@ fn main() {
         )
     };
     let elapsed = started.elapsed();
+
+    if args.categories {
+        run_categories(&root, &args, elapsed);
+        return;
+    }
+    if args.ncdu {
+        print_ncdu(&root, &args);
+        return;
+    }
 
     let now_epoch = now_epoch();
     // stale은 전체 트리에서 수집해야 하므로 truncate_depth 전에 계산한다.
@@ -207,6 +244,210 @@ fn main() {
                 f.path.display()
             );
         }
+    }
+}
+
+/// ncdu export format 1.0 — `ncdu -f <file>`로 브라우징 가능.
+/// 트리에는 임계 이상 파일(big_files)만 개별 기록되므로, 나머지는
+/// 디렉토리당 "(임계 미만 파일들)" 의사 항목으로 합산해 총량을 보존한다.
+fn print_ncdu(root: &DirNode, args: &Args) {
+    let header = serde_json::json!({
+        "progname": "space-mesh",
+        "progver": env!("CARGO_PKG_VERSION"),
+        "timestamp": now_epoch(),
+    });
+    let mut tree = ncdu_node(root, args.min_file_mib);
+    // 루트 이름은 ncdu 표시용 전체 경로로 교체.
+    if let Some(entries) = tree.as_array_mut() {
+        if let Some(head) = entries.first_mut() {
+            head["name"] = serde_json::Value::String(args.path.to_string_lossy().into_owned());
+        }
+    }
+    let out = serde_json::json!([1, 0, header, tree]);
+    println!("{}", out);
+}
+
+fn ncdu_node(node: &DirNode, min_file_mib: u64) -> serde_json::Value {
+    let mut arr: Vec<serde_json::Value> =
+        Vec::with_capacity(1 + node.children.len() + node.big_files.len() + 1);
+    arr.push(serde_json::json!({ "name": node.name }));
+
+    let mut covered_alloc = 0u64;
+    let mut covered_logical = 0u64;
+    for c in &node.children {
+        covered_alloc += c.allocated_size;
+        covered_logical += c.logical_size;
+        arr.push(ncdu_node(c, min_file_mib));
+    }
+    for f in &node.big_files {
+        covered_alloc += f.allocated_size;
+        covered_logical += f.logical_size;
+        let name = f
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| f.path.to_string_lossy().into_owned());
+        arr.push(serde_json::json!({
+            "name": name,
+            "asize": f.logical_size,
+            "dsize": f.allocated_size,
+        }));
+    }
+    // 개별 기록되지 않은 파일들 + 디렉토리 자체 블록의 합 (총량 보존).
+    let rest_alloc = node.allocated_size.saturating_sub(covered_alloc);
+    let rest_logical = node.logical_size.saturating_sub(covered_logical);
+    if rest_alloc > 0 || rest_logical > 0 {
+        arr.push(serde_json::json!({
+            "name": format!("({} MiB 미만 파일들)", min_file_mib),
+            "asize": rest_logical,
+            "dsize": rest_alloc,
+        }));
+    }
+    serde_json::Value::Array(arr)
+}
+
+/// 중복 파일 그룹 — 첫 파일 = 보존 추천본(최신 mtime).
+fn run_dups(args: &Args) {
+    let started = Instant::now();
+    let result = space_dedup::find_duplicates(
+        &args.path,
+        args.min_dup_mib.max(1) * 1024 * 1024,
+        None,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("error: {}: {}", args.path.display(), e);
+        std::process::exit(1);
+    });
+    let elapsed = started.elapsed();
+    let total_reclaimable: u64 = result.groups.iter().map(|g| g.reclaimable).sum();
+
+    if args.json {
+        let out = serde_json::json!({
+            "min_dup_mib": args.min_dup_mib,
+            "total_reclaimable": total_reclaimable,
+            "stats": {
+                "candidates": result.stats.candidates,
+                "partial_hashed": result.stats.partial_hashed,
+                "full_hashed": result.stats.full_hashed,
+                "elapsed_ms": elapsed.as_millis(),
+            },
+            "groups": result.groups.iter().map(|g| serde_json::json!({
+                "file_size": g.file_size,
+                "reclaimable": g.reclaimable,
+                "hash": g.hash_hex,
+                // 첫 파일 = 보존 추천본 (최신 mtime, 동률은 경로순).
+                "files": g.files.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return;
+    }
+
+    println!(
+        "{} groups, 회수 가능 {} (>= {} MiB, {:.2}s, 후보 {} → 부분해시 {} → 전체해시 {})",
+        result.groups.len(),
+        human(total_reclaimable),
+        args.min_dup_mib,
+        elapsed.as_secs_f64(),
+        result.stats.candidates,
+        result.stats.partial_hashed,
+        result.stats.full_hashed
+    );
+    for g in result.groups.iter().take(args.top.max(20)) {
+        println!(
+            "\n{} × {}  회수 {}  [{}]",
+            g.files.len(),
+            human(g.file_size),
+            human(g.reclaimable),
+            &g.hash_hex[..12.min(g.hash_hex.len())]
+        );
+        for (i, f) in g.files.iter().enumerate() {
+            let tag = if i == 0 { "  KEEP " } else { "       " };
+            println!("{}{}", tag, f.display());
+        }
+    }
+}
+
+/// 스캔 트리에서 빌드 산출물 카테고리 히트 출력.
+fn run_categories(root: &DirNode, args: &Args, elapsed: std::time::Duration) {
+    let hits = space_rules::categories::find_categories(root, &args.path);
+    let idle = space_rules::categories::annotate_idle(&hits);
+    let total: u64 = hits.iter().map(|h| h.allocated_size).sum();
+
+    if args.json {
+        let out = serde_json::json!({
+            "total_reclaimable": total,
+            "elapsed_ms": elapsed.as_millis(),
+            "hits": hits.iter().map(|h| serde_json::json!({
+                "category": h.def.id,
+                "title": h.def.title,
+                "safety": h.def.safety,
+                "path": h.path.to_string_lossy(),
+                "project": h.project_path.to_string_lossy(),
+                "allocated_size": h.allocated_size,
+                "file_count": h.file_count,
+                "verified": h.verified,
+                "recreate_command": h.def.recreate_command,
+                "idle_days": idle.get(&h.project_path),
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return;
+    }
+
+    println!(
+        "{} hits, 합계 {} ({:.2}s)",
+        hits.len(),
+        human(total),
+        elapsed.as_secs_f64()
+    );
+    for h in hits.iter().take(args.top.max(20)) {
+        let idle_label = idle
+            .get(&h.project_path)
+            .map(|d| format!("  idle {}d", d))
+            .unwrap_or_default();
+        println!(
+            "  {:>10}  [{}] {}{}{}",
+            human(h.allocated_size),
+            h.def.safety,
+            h.path.display(),
+            if h.verified { "" } else { "  (unverified)" },
+            idle_label
+        );
+    }
+}
+
+/// 설치된 도구의 공식 정리 커맨드 제안 (brew/docker 등 dry-run).
+fn run_advice(args: &Args) {
+    let advices = space_rules::advisor::advise();
+    if args.json {
+        let out = serde_json::json!({
+            "advices": advices.iter().map(|a| serde_json::json!({
+                "tool": a.tool,
+                "command": a.command,
+                "description": a.description,
+                "estimated_reclaim": a.estimated_reclaim,
+                "available": a.available,
+                "detail": a.detail,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return;
+    }
+    for a in &advices {
+        let reclaim = a
+            .estimated_reclaim
+            .map(|r| format!("  예상 회수 {}", human(r)))
+            .unwrap_or_default();
+        println!(
+            "  [{}] {}{}\n      $ {}\n      {} — {}",
+            if a.available { "ok" } else { "--" },
+            a.tool,
+            reclaim,
+            a.command,
+            a.description,
+            a.detail
+        );
     }
 }
 
