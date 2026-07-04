@@ -49,6 +49,9 @@ pub struct FileEntry {
     pub path: PathBuf,
     pub logical_size: u64,
     pub allocated_size: u64,
+    /// 마지막 수정 시각 (unix epoch 초). 스캔 시 확보한 Metadata에서 읽어
+    /// 추가 syscall 없이 채운다. 0 = 알 수 없음.
+    pub modified_epoch: i64,
 }
 
 /// 스캔 통계 (트리와 별도로 수집).
@@ -177,17 +180,24 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
             logical += md.len();
             allocated += alloc;
             file_count += 1;
-            ctx.total_files.fetch_add(1, Ordering::Relaxed);
-            if let Some(p) = &ctx.progress {
-                p.fetch_add(1, Ordering::Relaxed);
-            }
             if md.len() >= ctx.opts.record_file_threshold {
                 big_files.push(FileEntry {
                     path: entry.path(),
                     logical_size: md.len(),
                     allocated_size: alloc,
+                    modified_epoch: md.mtime(),
                 });
             }
+        }
+    }
+
+    // 원자 카운터는 파일당이 아니라 디렉토리당 1회 가산 — 멀티코어 스캔의
+    // 공유 캐시라인 경합을 줄인다 (PERF-004). progress는 UI 폴링용이라
+    // 디렉토리 단위 granularity로 충분하다.
+    if file_count > 0 {
+        ctx.total_files.fetch_add(file_count, Ordering::Relaxed);
+        if let Some(p) = &ctx.progress {
+            p.fetch_add(file_count, Ordering::Relaxed);
         }
     }
 
@@ -219,7 +229,7 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
 pub fn top_files(root: &DirNode, n: usize) -> Vec<FileEntry> {
     let mut all = Vec::new();
     collect_files(root, &mut all);
-    all.sort_by(|a, b| b.allocated_size.cmp(&a.allocated_size));
+    all.sort_by_key(|f| std::cmp::Reverse(f.allocated_size));
     all.truncate(n);
     all
 }
@@ -229,6 +239,36 @@ fn collect_files(node: &DirNode, out: &mut Vec<FileEntry>) {
     for c in &node.children {
         collect_files(c, out);
     }
+}
+
+/// modified_epoch 기준 경과일수 (미래 mtime이면 음수).
+pub fn age_days(modified_epoch: i64, now_epoch: i64) -> i64 {
+    (now_epoch - modified_epoch) / 86_400
+}
+
+/// 방치 점수 — allocated_size × 경과일 (곱 오버플로 방지 u128).
+/// 크기와 방치 기간 모두에 비례하는, 설명 가능한 단순 랭킹.
+pub fn stale_score(f: &FileEntry, now_epoch: i64) -> u128 {
+    let days = age_days(f.modified_epoch, now_epoch).max(0) as u128;
+    f.allocated_size as u128 * days
+}
+
+/// 트리 전체에서 "크고 오래 방치된" 파일 top-N (점수 내림차순).
+/// mtime을 모르거나(0) min_age_days 미만인 파일은 제외한다.
+pub fn stale_files(
+    root: &DirNode,
+    n: usize,
+    min_age_days: u64,
+    now_epoch: i64,
+) -> Vec<FileEntry> {
+    let mut all = Vec::new();
+    collect_files(root, &mut all);
+    all.retain(|f| {
+        f.modified_epoch > 0 && age_days(f.modified_epoch, now_epoch) >= min_age_days as i64
+    });
+    all.sort_by_key(|f| std::cmp::Reverse(stale_score(f, now_epoch)));
+    all.truncate(n);
+    all
 }
 
 /// JSON 직렬화 전에 트리를 max_depth까지만 남기고 잘라낸다 (집계값은 유지).
@@ -285,6 +325,45 @@ mod tests {
         assert_eq!(result.root.logical_size, 40_000);
 
         fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn stale_files_ranked_by_size_times_age() {
+        let tmp = std::env::temp_dir().join(format!("space-mesh-stale-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        write_file(&tmp.join("fresh-big.bin"), 100_000);
+        write_file(&tmp.join("old-small.bin"), 60_000);
+        write_file(&tmp.join("old-big.bin"), 90_000);
+
+        // old-* 파일의 mtime을 과거로 되돌린다 (400일 / 200일 전).
+        let day = std::time::Duration::from_secs(86_400);
+        let set_age = |name: &str, days: u64| {
+            let f = File::options().write(true).open(tmp.join(name)).unwrap();
+            f.set_modified(std::time::SystemTime::now() - day * days as u32)
+                .unwrap();
+        };
+        set_age("old-small.bin", 400);
+        set_age("old-big.bin", 200);
+
+        let opts = ScanOptions {
+            record_file_threshold: 50_000,
+            ..Default::default()
+        };
+        let result = scan(&tmp, opts).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // 신선한 파일은 min_age_days에 걸러지고, 점수(크기×방치일) 내림차순이어야 한다.
+        let stale = stale_files(&result.root, 10, 30, now);
+        assert_eq!(stale.len(), 2, "{:?}", stale);
+        // old-small: 60KB×400d = 24M, old-big: 90KB×200d = 18M → old-small이 1위.
+        assert!(stale[0].path.ends_with("old-small.bin"), "{:?}", stale[0].path);
+        assert!(stale[1].path.ends_with("old-big.bin"));
+        assert!(stale[0].modified_epoch > 0);
+        assert!(age_days(stale[0].modified_epoch, now) >= 399);
     }
 
     #[test]

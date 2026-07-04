@@ -16,10 +16,16 @@ pub struct SnapshotMeta {
     pub total_dirs: u64,
 }
 
+/// 루트당 유지할 기본 스냅샷 개수 (PERF-005 — 무한 축적 방지).
+pub const DEFAULT_KEEP_SNAPSHOTS: usize = 30;
+
 pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(db_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
+    // SQLite는 연결별로 foreign_keys가 기본 OFF — 켜지 않으면 스키마의
+    // ON DELETE CASCADE가 동작하지 않는다.
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS scans (
             id INTEGER PRIMARY KEY,
@@ -45,10 +51,16 @@ pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
             node_id INTEGER NOT NULL,
             path TEXT NOT NULL,
             logical_size INTEGER NOT NULL,
-            allocated_size INTEGER NOT NULL
+            allocated_size INTEGER NOT NULL,
+            modified_epoch INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_big_files_scan ON big_files(scan_id);",
     )?;
+    // 구버전 DB 마이그레이션: modified_epoch 컬럼 추가 (이미 있으면 에러 무시).
+    let _ = conn.execute(
+        "ALTER TABLE big_files ADD COLUMN modified_epoch INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     Ok(conn)
 }
 
@@ -74,8 +86,8 @@ pub fn save_snapshot(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         let mut file_stmt = tx.prepare(
-            "INSERT INTO big_files (scan_id, node_id, path, logical_size, allocated_size)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO big_files (scan_id, node_id, path, logical_size, allocated_size, modified_epoch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
 
         // 명시적 스택으로 순회 (트리 깊이에 따른 콜스택 부담 회피).
@@ -100,7 +112,8 @@ pub fn save_snapshot(
                     node_id,
                     f.path.to_string_lossy(),
                     f.logical_size as i64,
-                    f.allocated_size as i64
+                    f.allocated_size as i64,
+                    f.modified_epoch
                 ])?;
             }
             for c in &node.children {
@@ -175,7 +188,8 @@ fn load_tree(conn: &Connection, scan_id: i64) -> rusqlite::Result<Option<DirNode
 
     let mut big: HashMap<i64, Vec<FileEntry>> = HashMap::new();
     let mut fstmt = conn.prepare(
-        "SELECT node_id, path, logical_size, allocated_size FROM big_files WHERE scan_id = ?1",
+        "SELECT node_id, path, logical_size, allocated_size, modified_epoch
+         FROM big_files WHERE scan_id = ?1",
     )?;
     let files = fstmt.query_map(params![scan_id], |row| {
         Ok((
@@ -184,6 +198,7 @@ fn load_tree(conn: &Connection, scan_id: i64) -> rusqlite::Result<Option<DirNode
                 path: PathBuf::from(row.get::<_, String>(1)?),
                 logical_size: row.get::<_, i64>(2)? as u64,
                 allocated_size: row.get::<_, i64>(3)? as u64,
+                modified_epoch: row.get::<_, i64>(4)?,
             },
         ))
     })?;
@@ -192,34 +207,41 @@ fn load_tree(conn: &Connection, scan_id: i64) -> rusqlite::Result<Option<DirNode
         big.entry(node_id).or_default().push(entry);
     }
 
-    // node_id -> children 목록을 만들고 루트(parent NULL)부터 조립.
-    let mut children_of: HashMap<i64, Vec<Row>> = HashMap::new();
-    let mut root_row: Option<Row> = None;
+    // 재귀 없이 바닥부터 조립한다 (PERF-006 — 깊은 트리 콜스택 위험 제거).
+    // save_snapshot이 스택 순회로 부모에게 항상 자식보다 작은 node_id를
+    // 부여하므로, node_id 내림차순 처리 = 자식이 항상 부모보다 먼저 완성된다.
+    let mut children_ids: HashMap<i64, Vec<i64>> = HashMap::new();
+    let mut nodes: HashMap<i64, (Option<i64>, DirNode)> = HashMap::new();
     for r in rows {
-        match r.parent_id {
-            None => root_row = Some(r),
-            Some(p) => children_of.entry(p).or_default().push(r),
+        if let Some(p) = r.parent_id {
+            children_ids.entry(p).or_default().push(r.node_id);
         }
+        nodes.insert(r.node_id, (r.parent_id, r.node));
     }
-    fn attach(
-        row: &mut Row,
-        children_of: &mut HashMap<i64, Vec<Row>>,
-        big: &mut HashMap<i64, Vec<FileEntry>>,
-    ) {
-        if let Some(files) = big.remove(&row.node_id) {
-            row.node.big_files = files;
-        }
-        if let Some(mut kids) = children_of.remove(&row.node_id) {
-            for k in &mut kids {
-                attach(k, children_of, big);
+    let mut ids: Vec<i64> = nodes.keys().copied().collect();
+    ids.sort_unstable_by_key(|id| std::cmp::Reverse(*id));
+    for id in ids {
+        if let Some(files) = big.remove(&id) {
+            if let Some((_, node)) = nodes.get_mut(&id) {
+                node.big_files = files;
             }
-            row.node.children = kids.into_iter().map(|k| k.node).collect();
+        }
+        if let Some(kid_ids) = children_ids.remove(&id) {
+            // 자식들은 이미(더 큰 id) 서브트리까지 완성된 상태 — 부모로 이동.
+            let kids: Vec<DirNode> = kid_ids
+                .into_iter()
+                .filter_map(|k| nodes.remove(&k).map(|(_, n)| n))
+                .collect();
+            if let Some((_, node)) = nodes.get_mut(&id) {
+                node.children = kids;
+            }
         }
     }
-
-    let Some(mut root_row) = root_row else { return Ok(None) };
-    attach(&mut root_row, &mut children_of, &mut big);
-    Ok(Some(root_row.node))
+    // 남는 것은 루트(parent NULL)뿐이어야 한다.
+    Ok(nodes
+        .into_values()
+        .find(|(parent, _)| parent.is_none())
+        .map(|(_, node)| node))
 }
 
 #[cfg(test)]
@@ -264,6 +286,64 @@ mod tests {
             count(&loaded)
         };
         assert_eq!(total_big, 2);
+        // mtime도 저장/복원되어야 한다 (방금 만든 파일이므로 0일 수 없음).
+        {
+            fn assert_mtimes(n: &DirNode) {
+                for f in &n.big_files {
+                    assert!(f.modified_epoch > 0, "mtime lost for {:?}", f.path);
+                }
+                n.children.iter().for_each(assert_mtimes);
+            }
+            assert_mtimes(&loaded);
+        }
+
+        drop(conn);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn prune_keeps_recent_and_removes_orphans() {
+        let tmp = std::env::temp_dir().join(format!("space-index-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("a.bin"), vec![1u8; 5000]).unwrap();
+
+        let db = tmp.join("snap.db");
+        let mut conn = open(&db).unwrap();
+        let result = scan(
+            &tmp,
+            ScanOptions {
+                record_file_threshold: 1000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            ids.push(save_snapshot(&mut conn, &tmp, &result).unwrap());
+        }
+
+        let pruned = prune_snapshots(&mut conn, &tmp, 2).unwrap();
+        assert_eq!(pruned, 1);
+        let remaining = list_snapshots(&conn, &tmp).unwrap();
+        assert_eq!(remaining.len(), 2);
+        // 최신 2개가 남고, 가장 오래된 스냅샷의 노드/파일 행도 함께 사라져야 한다.
+        assert!(remaining.iter().all(|m| m.scan_id != ids[0]));
+        let orphan_nodes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE scan_id = ?1",
+                params![ids[0]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let orphan_files: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM big_files WHERE scan_id = ?1",
+                params![ids[0]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((orphan_nodes, orphan_files), (0, 0));
 
         drop(conn);
         let _ = fs::remove_dir_all(&tmp);
@@ -293,6 +373,34 @@ pub fn list_snapshots(conn: &Connection, root_path: &Path) -> rusqlite::Result<V
 /// scan_id로 스냅샷 트리 로드.
 pub fn load_by_id(conn: &Connection, scan_id: i64) -> rusqlite::Result<Option<DirNode>> {
     load_tree(conn, scan_id)
+}
+
+/// 루트당 최근 keep개만 남기고 오래된 스냅샷을 삭제한다 (PERF-005).
+/// 구버전 DB는 연결 당시 foreign_keys가 꺼진 채 쌓였을 수 있으므로
+/// CASCADE에 기대지 않고 명시적으로 지운다. 반환: 삭제한 스냅샷 수.
+pub fn prune_snapshots(
+    conn: &mut Connection,
+    root_path: &Path,
+    keep: usize,
+) -> rusqlite::Result<u64> {
+    let tx = conn.transaction()?;
+    let old_ids: Vec<i64> = {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM scans WHERE root_path = ?1 ORDER BY id DESC LIMIT -1 OFFSET ?2",
+        )?;
+        let rows = stmt.query_map(
+            params![root_path.to_string_lossy(), keep as i64],
+            |r| r.get(0),
+        )?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for id in &old_ids {
+        tx.execute("DELETE FROM big_files WHERE scan_id = ?1", params![id])?;
+        tx.execute("DELETE FROM nodes WHERE scan_id = ?1", params![id])?;
+        tx.execute("DELETE FROM scans WHERE id = ?1", params![id])?;
+    }
+    tx.commit()?;
+    Ok(old_ids.len() as u64)
 }
 
 /// 두 스냅샷 간 변화의 "범인"을 찾는다 — 잔차 귀속(residual attribution):
@@ -331,7 +439,7 @@ pub fn diff_trees(old: Option<&DirNode>, new: Option<&DirNode>, min_delta: u64) 
         .map(|n| n.name.clone())
         .unwrap_or_default();
     attribute(old, new, &root_name, min_delta as i64, &mut out);
-    out.sort_by(|a, b| b.delta.abs().cmp(&a.delta.abs()));
+    out.sort_by_key(|f| std::cmp::Reverse(f.delta.abs()));
     out
 }
 
