@@ -701,6 +701,14 @@ public protocol ScanHandleProtocol: AnyObject, Sendable {
     func children(indexPath: [UInt32]) throws  -> [NodeInfo]
     
     /**
+     * 스캔 트리를 재사용하는 중복 검사 — 재스캔 없이 즉시 해시 단계로 (PERF-001).
+     * subroot가 비어 있지 않으면 그 경로 하위만 검사한다.
+     * 주의: min_size_mib가 스캔 기록 임계보다 작으면 그 사이 파일은 트리에 없어
+     * 누락된다 — 호출자(Swift)가 조건을 만족할 때만 이 경로를 택한다.
+     */
+    func findDuplicatesInTree(subroot: String, minSizeMib: UInt64)  -> [DupGroupInfo]
+    
+    /**
      * index path를 실제 파일시스템 경로 문자열로 변환 (Finder 표시/Quick Look용).
      */
     func fullPath(indexPath: [UInt32]) throws  -> String
@@ -722,6 +730,13 @@ public protocol ScanHandleProtocol: AnyObject, Sendable {
      * index path가 가리키는 노드의 정보.
      */
     func nodeAt(indexPath: [UInt32]) throws  -> NodeInfo
+    
+    /**
+     * 트리 전체에서 "크고 오래 방치된" 파일 top-N (점수 = allocated × 방치일).
+     * min_age_days 이상 수정이 없던 파일만 포함한다. 랭킹은 읽기 전용 —
+     * 삭제는 UI의 기존 안전망(가드 + 휴지통 + undo)을 거친다.
+     */
+    func staleFiles(limit: UInt32, minAgeDays: UInt32)  -> [BigFile]
     
     func stats()  -> ScanStatsInfo
     
@@ -817,6 +832,21 @@ open func children(indexPath: [UInt32])throws  -> [NodeInfo]  {
 }
     
     /**
+     * 스캔 트리를 재사용하는 중복 검사 — 재스캔 없이 즉시 해시 단계로 (PERF-001).
+     * subroot가 비어 있지 않으면 그 경로 하위만 검사한다.
+     * 주의: min_size_mib가 스캔 기록 임계보다 작으면 그 사이 파일은 트리에 없어
+     * 누락된다 — 호출자(Swift)가 조건을 만족할 때만 이 경로를 택한다.
+     */
+open func findDuplicatesInTree(subroot: String, minSizeMib: UInt64) -> [DupGroupInfo]  {
+    return try!  FfiConverterSequenceTypeDupGroupInfo.lift(try! rustCall() {
+    uniffi_space_ffi_fn_method_scanhandle_find_duplicates_in_tree(self.uniffiClonePointer(),
+        FfiConverterString.lower(subroot),
+        FfiConverterUInt64.lower(minSizeMib),$0
+    )
+})
+}
+    
+    /**
      * index path를 실제 파일시스템 경로 문자열로 변환 (Finder 표시/Quick Look용).
      */
 open func fullPath(indexPath: [UInt32])throws  -> String  {
@@ -860,6 +890,20 @@ open func nodeAt(indexPath: [UInt32])throws  -> NodeInfo  {
     return try  FfiConverterTypeNodeInfo_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
     uniffi_space_ffi_fn_method_scanhandle_node_at(self.uniffiClonePointer(),
         FfiConverterSequenceUInt32.lower(indexPath),$0
+    )
+})
+}
+    
+    /**
+     * 트리 전체에서 "크고 오래 방치된" 파일 top-N (점수 = allocated × 방치일).
+     * min_age_days 이상 수정이 없던 파일만 포함한다. 랭킹은 읽기 전용 —
+     * 삭제는 UI의 기존 안전망(가드 + 휴지통 + undo)을 거친다.
+     */
+open func staleFiles(limit: UInt32, minAgeDays: UInt32) -> [BigFile]  {
+    return try!  FfiConverterSequenceTypeBigFile.lift(try! rustCall() {
+    uniffi_space_ffi_fn_method_scanhandle_stale_files(self.uniffiClonePointer(),
+        FfiConverterUInt32.lower(limit),
+        FfiConverterUInt32.lower(minAgeDays),$0
     )
 })
 }
@@ -942,13 +986,21 @@ public struct BigFile {
     public var path: String
     public var logicalSize: UInt64
     public var allocatedSize: UInt64
+    /**
+     * 마지막 수정 시각 (unix epoch 초). 0 = 알 수 없음 (구버전 스냅샷).
+     */
+    public var modifiedEpoch: Int64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(path: String, logicalSize: UInt64, allocatedSize: UInt64) {
+    public init(path: String, logicalSize: UInt64, allocatedSize: UInt64, 
+        /**
+         * 마지막 수정 시각 (unix epoch 초). 0 = 알 수 없음 (구버전 스냅샷).
+         */modifiedEpoch: Int64) {
         self.path = path
         self.logicalSize = logicalSize
         self.allocatedSize = allocatedSize
+        self.modifiedEpoch = modifiedEpoch
     }
 }
 
@@ -968,6 +1020,9 @@ extension BigFile: Equatable, Hashable {
         if lhs.allocatedSize != rhs.allocatedSize {
             return false
         }
+        if lhs.modifiedEpoch != rhs.modifiedEpoch {
+            return false
+        }
         return true
     }
 
@@ -975,6 +1030,7 @@ extension BigFile: Equatable, Hashable {
         hasher.combine(path)
         hasher.combine(logicalSize)
         hasher.combine(allocatedSize)
+        hasher.combine(modifiedEpoch)
     }
 }
 
@@ -989,7 +1045,8 @@ public struct FfiConverterTypeBigFile: FfiConverterRustBuffer {
             try BigFile(
                 path: FfiConverterString.read(from: &buf), 
                 logicalSize: FfiConverterUInt64.read(from: &buf), 
-                allocatedSize: FfiConverterUInt64.read(from: &buf)
+                allocatedSize: FfiConverterUInt64.read(from: &buf), 
+                modifiedEpoch: FfiConverterInt64.read(from: &buf)
         )
     }
 
@@ -997,6 +1054,7 @@ public struct FfiConverterTypeBigFile: FfiConverterRustBuffer {
         FfiConverterString.write(value.path, into: &buf)
         FfiConverterUInt64.write(value.logicalSize, into: &buf)
         FfiConverterUInt64.write(value.allocatedSize, into: &buf)
+        FfiConverterInt64.write(value.modifiedEpoch, into: &buf)
     }
 }
 
@@ -2974,6 +3032,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_space_ffi_checksum_method_scanhandle_children() != 43903) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_space_ffi_checksum_method_scanhandle_find_duplicates_in_tree() != 51694) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_space_ffi_checksum_method_scanhandle_full_path() != 40006) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2984,6 +3045,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_node_at() != 21162) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_method_scanhandle_stale_files() != 62394) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_stats() != 61743) {

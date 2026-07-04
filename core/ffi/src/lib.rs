@@ -52,6 +52,17 @@ pub struct BigFile {
     pub path: String,
     pub logical_size: u64,
     pub allocated_size: u64,
+    /// 마지막 수정 시각 (unix epoch 초). 0 = 알 수 없음 (구버전 스냅샷).
+    pub modified_epoch: i64,
+}
+
+fn to_big_file(f: space_scanner::FileEntry) -> BigFile {
+    BigFile {
+        path: f.path.to_string_lossy().into_owned(),
+        logical_size: f.logical_size,
+        allocated_size: f.allocated_size,
+        modified_epoch: f.modified_epoch,
+    }
 }
 
 #[derive(uniffi::Record)]
@@ -110,23 +121,15 @@ impl ScanHandle {
             .enumerate()
             .map(|(i, c)| to_info(i as u32, c))
             .collect();
-        infos.sort_by(|a, b| b.allocated_size.cmp(&a.allocated_size));
+        infos.sort_by_key(|f| std::cmp::Reverse(f.allocated_size));
         Ok(infos)
     }
 
     /// 해당 노드 직속의 대용량 파일 (allocated 내림차순).
     pub fn big_files_at(&self, index_path: Vec<u32>) -> Result<Vec<BigFile>, ScanError> {
         let node = self.resolve(&index_path)?;
-        let mut files: Vec<BigFile> = node
-            .big_files
-            .iter()
-            .map(|f| BigFile {
-                path: f.path.to_string_lossy().into_owned(),
-                logical_size: f.logical_size,
-                allocated_size: f.allocated_size,
-            })
-            .collect();
-        files.sort_by(|a, b| b.allocated_size.cmp(&a.allocated_size));
+        let mut files: Vec<BigFile> = node.big_files.iter().cloned().map(to_big_file).collect();
+        files.sort_by_key(|f| std::cmp::Reverse(f.allocated_size));
         Ok(files)
     }
 
@@ -134,11 +137,21 @@ impl ScanHandle {
     pub fn top_files(&self, limit: u32) -> Vec<BigFile> {
         space_scanner::top_files(&self.root, limit as usize)
             .into_iter()
-            .map(|f| BigFile {
-                path: f.path.to_string_lossy().into_owned(),
-                logical_size: f.logical_size,
-                allocated_size: f.allocated_size,
-            })
+            .map(to_big_file)
+            .collect()
+    }
+
+    /// 트리 전체에서 "크고 오래 방치된" 파일 top-N (점수 = allocated × 방치일).
+    /// min_age_days 이상 수정이 없던 파일만 포함한다. 랭킹은 읽기 전용 —
+    /// 삭제는 UI의 기존 안전망(가드 + 휴지통 + undo)을 거친다.
+    pub fn stale_files(&self, limit: u32, min_age_days: u32) -> Vec<BigFile> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        space_scanner::stale_files(&self.root, limit as usize, min_age_days as u64, now)
+            .into_iter()
+            .map(to_big_file)
             .collect()
     }
 
@@ -235,6 +248,12 @@ pub fn scan_and_save(
             msg: e.to_string(),
         }
     })?;
+    // 루트당 최근 N개만 유지 — DB 무한 성장 방지 (실패해도 스캔은 유효).
+    let _ = space_index::prune_snapshots(
+        &mut conn,
+        &root_path,
+        space_index::DEFAULT_KEEP_SNAPSHOTS,
+    );
     Ok(Arc::new(ScanHandle {
         root_path,
         stats: ScanStatsInfo {
@@ -291,17 +310,8 @@ pub struct DupGroupInfo {
     pub files: Vec<String>,
 }
 
-/// root 아래 min_size_mib 이상 파일의 중복 그룹. 블로킹 — 백그라운드에서 호출.
-/// 진행 상황은 scan_progress()로 폴링 (해시 처리 파일 수).
-#[uniffi::export]
-pub fn find_duplicates(root: String, min_size_mib: u64) -> Result<Vec<DupGroupInfo>, ScanError> {
-    let result = space_dedup::find_duplicates(
-        Path::new(&root),
-        min_size_mib.max(1) * 1024 * 1024,
-        Some(reset_progress()),
-    )
-    .map_err(|e| ScanError::Io { msg: e.to_string() })?;
-    Ok(result
+fn to_dup_groups(result: space_dedup::DedupResult) -> Vec<DupGroupInfo> {
+    result
         .groups
         .into_iter()
         .map(|g| DupGroupInfo {
@@ -314,7 +324,42 @@ pub fn find_duplicates(root: String, min_size_mib: u64) -> Result<Vec<DupGroupIn
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect(),
         })
-        .collect())
+        .collect()
+}
+
+/// root 아래 min_size_mib 이상 파일의 중복 그룹. 블로킹 — 백그라운드에서 호출.
+/// 진행 상황은 scan_progress()로 폴링 (해시 처리 파일 수).
+#[uniffi::export]
+pub fn find_duplicates(root: String, min_size_mib: u64) -> Result<Vec<DupGroupInfo>, ScanError> {
+    let result = space_dedup::find_duplicates(
+        Path::new(&root),
+        min_size_mib.max(1) * 1024 * 1024,
+        Some(reset_progress()),
+    )
+    .map_err(|e| ScanError::Io { msg: e.to_string() })?;
+    Ok(to_dup_groups(result))
+}
+
+#[uniffi::export]
+impl ScanHandle {
+    /// 스캔 트리를 재사용하는 중복 검사 — 재스캔 없이 즉시 해시 단계로 (PERF-001).
+    /// subroot가 비어 있지 않으면 그 경로 하위만 검사한다.
+    /// 주의: min_size_mib가 스캔 기록 임계보다 작으면 그 사이 파일은 트리에 없어
+    /// 누락된다 — 호출자(Swift)가 조건을 만족할 때만 이 경로를 택한다.
+    pub fn find_duplicates_in_tree(&self, subroot: String, min_size_mib: u64) -> Vec<DupGroupInfo> {
+        let sub = if subroot.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(subroot))
+        };
+        let result = space_dedup::find_duplicates_in_tree(
+            &self.root,
+            sub.as_deref(),
+            min_size_mib.max(1) * 1024 * 1024,
+            Some(reset_progress()),
+        );
+        to_dup_groups(result)
+    }
 }
 
 // ───────────────────────── 카테고리 뷰 (스캔 트리 재사용) ─────────────────────────
@@ -611,7 +656,7 @@ impl DiffHandle {
                 kind: "rest".to_string(),
             });
         }
-        rows.sort_by(|a, b| b.delta.abs().cmp(&a.delta.abs()));
+        rows.sort_by_key(|f| std::cmp::Reverse(f.delta.abs()));
         rows
     }
 

@@ -301,6 +301,11 @@ RustBuffer uniffi_space_ffi_fn_method_scanhandle_categories(void*_Nonnull ptr, R
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_children(void*_Nonnull ptr, RustBuffer index_path, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_FIND_DUPLICATES_IN_TREE
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_FIND_DUPLICATES_IN_TREE
+RustBuffer uniffi_space_ffi_fn_method_scanhandle_find_duplicates_in_tree(void*_Nonnull ptr, RustBuffer subroot, uint64_t min_size_mib, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_FULL_PATH
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_FULL_PATH
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_full_path(void*_Nonnull ptr, RustBuffer index_path, RustCallStatus *_Nonnull out_status
@@ -319,6 +324,11 @@ RustBuffer uniffi_space_ffi_fn_method_scanhandle_git_repos_cached(void*_Nonnull 
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_NODE_AT
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_NODE_AT
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_node_at(void*_Nonnull ptr, RustBuffer index_path, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_STALE_FILES
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_STALE_FILES
+RustBuffer uniffi_space_ffi_fn_method_scanhandle_stale_files(void*_Nonnull ptr, uint32_t limit, uint32_t min_age_days, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_STATS
@@ -770,6 +780,12 @@ uint16_t uniffi_space_ffi_checksum_method_scanhandle_children(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_FIND_DUPLICATES_IN_TREE
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_FIND_DUPLICATES_IN_TREE
+uint16_t uniffi_space_ffi_checksum_method_scanhandle_find_duplicates_in_tree(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_FULL_PATH
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_FULL_PATH
 uint16_t uniffi_space_ffi_checksum_method_scanhandle_full_path(void
@@ -791,6 +807,12 @@ uint16_t uniffi_space_ffi_checksum_method_scanhandle_git_repos_cached(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_NODE_AT
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_NODE_AT
 uint16_t uniffi_space_ffi_checksum_method_scanhandle_node_at(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_STALE_FILES
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_STALE_FILES
+uint16_t uniffi_space_ffi_checksum_method_scanhandle_stale_files(void
     
 );
 #endif

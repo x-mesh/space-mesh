@@ -6,6 +6,7 @@ import SwiftUI
 /// 중복 파일 탐지 뷰 — 크기→부분해시→전체해시 3단 필터 결과.
 struct DuplicatesView: View {
     @ObservedObject var model: CleanupModel
+    @EnvironmentObject private var app: AppModel
     let defaultRoot: String
 
     @State private var root: String = ""
@@ -53,7 +54,7 @@ struct DuplicatesView: View {
                 undoAvailable: !model.lastBatch.isEmpty,
                 onTrash: { confirmTrash = true },
                 onUndo: { model.undoLastBatch() },
-                onRefresh: { model.findDups(root: root, minMib: minMib) }
+                onRefresh: { model.findDups(root: root, minMib: minMib, handle: app.handle, scannedRoot: app.scannedRoot) }
             )
         }
         .onAppear {
@@ -66,7 +67,7 @@ struct DuplicatesView: View {
         ) {
             Button("휴지통으로 이동", role: .destructive) {
                 model.trash(paths: selectedItems)
-                model.findDups(root: root, minMib: minMib)
+                model.findDups(root: root, minMib: minMib, handle: app.handle, scannedRoot: app.scannedRoot)
             }
         }
     }
@@ -102,7 +103,7 @@ struct DuplicatesView: View {
             }
 
             Button {
-                model.findDups(root: root, minMib: minMib)
+                model.findDups(root: root, minMib: minMib, handle: app.handle, scannedRoot: app.scannedRoot)
             } label: {
                 Text("검색")
                     .font(.system(size: 11, weight: .bold))
@@ -124,7 +125,7 @@ struct DuplicatesView: View {
                 Text(humanBytes(totalReclaimable))
                     .font(.dataCell)
                     .foregroundStyle(Theme.accent)
-                Button("첫 파일만 남기고 모두 선택") {
+                Button("추천본만 남기고 모두 선택") {
                     model.selectedDupPaths = Set(
                         model.dupGroups.flatMap { $0.files.dropFirst() })
                 }
@@ -192,7 +193,7 @@ struct DuplicatesView: View {
                     .lineLimit(1)
             }
             if isFirst {
-                TagBadge(text: "원본 후보", color: Theme.info)
+                TagBadge(text: "보존 추천 · 최신", color: Theme.info)
             }
             Spacer()
         }

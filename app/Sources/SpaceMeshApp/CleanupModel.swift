@@ -58,16 +58,31 @@ final class CleanupModel: ObservableObject {
         }
     }
 
-    func findDups(root: String, minMib: UInt64) {
+    /// handle이 root를 덮는 스캔 트리를 들고 있고 임계 조건이 맞으면 재스캔 없이
+    /// 트리를 재사용한다 (PERF-001). 아니면 기존 전체 재스캔 경로로 폴백.
+    func findDups(root: String, minMib: UInt64, handle: ScanHandle?, scannedRoot: String) {
         guard !isFindingDups else { return }
         isFindingDups = true
         dupStartedAt = Date()
         selectedDupPaths = []
+        let reusable =
+            handle != nil
+            && !scannedRoot.isEmpty
+            && (root == scannedRoot || root.hasPrefix(scannedRoot + "/"))
+            && minMib >= AppModel.scanRecordMinFileMib
         Task {
             do {
-                let groups = try await Task.detached(priority: .userInitiated) {
-                    try findDuplicates(root: root, minSizeMib: minMib)
-                }.value
+                let groups: [DupGroupInfo]
+                if reusable, let handle {
+                    let subroot = root == scannedRoot ? "" : root
+                    groups = await Task.detached(priority: .userInitiated) {
+                        handle.findDuplicatesInTree(subroot: subroot, minSizeMib: minMib)
+                    }.value
+                } else {
+                    groups = try await Task.detached(priority: .userInitiated) {
+                        try findDuplicates(root: root, minSizeMib: minMib)
+                    }.value
+                }
                 self.dupGroups = groups
             } catch {
                 self.message = "중복 검사 실패: \(error)"

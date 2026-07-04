@@ -45,6 +45,10 @@ struct Args {
     /// diff에서 보고할 최소 변화량 (MiB)
     #[arg(long, default_value_t = 10)]
     min_delta_mib: u64,
+
+    /// Stale files 섹션에서 방치로 간주할 최소 경과일
+    #[arg(long, default_value_t = 180)]
+    stale_days: u64,
 }
 
 fn main() {
@@ -102,7 +106,18 @@ fn main() {
                 std::process::exit(1);
             });
             match space_index::save_snapshot(&mut conn, &args.path, &result) {
-                Ok(id) => eprintln!("snapshot #{} saved to {}", id, db_path.display()),
+                Ok(id) => {
+                    eprintln!("snapshot #{} saved to {}", id, db_path.display());
+                    // 루트당 최근 N개만 유지 (PERF-005).
+                    match space_index::prune_snapshots(
+                        &mut conn,
+                        &args.path,
+                        space_index::DEFAULT_KEEP_SNAPSHOTS,
+                    ) {
+                        Ok(n) if n > 0 => eprintln!("pruned {} old snapshot(s)", n),
+                        _ => {}
+                    }
+                }
                 Err(e) => eprintln!("warning: snapshot save failed: {}", e),
             }
         }
@@ -116,10 +131,27 @@ fn main() {
     };
     let elapsed = started.elapsed();
 
+    let now_epoch = now_epoch();
+    // stale은 전체 트리에서 수집해야 하므로 truncate_depth 전에 계산한다.
+    let stale = space_scanner::stale_files(&root, args.top, args.stale_days, now_epoch);
+
     if args.json {
+        let stale_json: Vec<_> = stale
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "path": f.path,
+                    "allocated_size": f.allocated_size,
+                    "modified_epoch": f.modified_epoch,
+                    "age_days": space_scanner::age_days(f.modified_epoch, now_epoch),
+                })
+            })
+            .collect();
         truncate_depth(&mut root, args.depth);
         let out = serde_json::json!({
             "root": root,
+            "stale": stale_json,
+            "stale_days": args.stale_days,
             "stats": {
                 "files": total_files,
                 "dirs": total_dirs,
@@ -153,9 +185,44 @@ fn main() {
     if !files.is_empty() {
         println!("\nTop files (>= {} MiB):", args.min_file_mib);
         for f in files {
-            println!("  {:>10}  {}", human(f.allocated_size), f.path.display());
+            println!(
+                "  {:>10}  {:>5}  {}",
+                human(f.allocated_size),
+                age_label(f.modified_epoch, now_epoch),
+                f.path.display()
+            );
         }
     }
+
+    if !stale.is_empty() {
+        println!(
+            "\nStale files (>= {} MiB, {}일+ 방치, 크기×방치일 순):",
+            args.min_file_mib, args.stale_days
+        );
+        for f in stale {
+            println!(
+                "  {:>10}  {:>5}  {}",
+                human(f.allocated_size),
+                age_label(f.modified_epoch, now_epoch),
+                f.path.display()
+            );
+        }
+    }
+}
+
+fn now_epoch() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// "382d" 같은 경과일 라벨. mtime을 모르면 "-".
+fn age_label(modified_epoch: i64, now_epoch: i64) -> String {
+    if modified_epoch <= 0 {
+        return "-".to_string();
+    }
+    format!("{}d", space_scanner::age_days(modified_epoch, now_epoch).max(0))
 }
 
 /// 최근 두 스냅샷 비교 — 변화의 범인 출력.
@@ -249,7 +316,7 @@ fn print_tree(node: &DirNode, depth: usize, max_depth: usize, top: usize, total:
         return;
     }
     let mut children: Vec<&DirNode> = node.children.iter().collect();
-    children.sort_by(|a, b| b.allocated_size.cmp(&a.allocated_size));
+    children.sort_by_key(|f| std::cmp::Reverse(f.allocated_size));
     for c in children.into_iter().take(top) {
         print_tree(c, depth + 1, max_depth, top, total);
     }

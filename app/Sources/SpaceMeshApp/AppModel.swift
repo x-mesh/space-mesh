@@ -16,6 +16,8 @@ final class AppModel: ObservableObject {
     @Published var currentPath: String = ""
     @Published var children: [NodeInfo] = []
     @Published var bigFiles: [BigFile] = []
+    /// 트리 전체의 "크고 오래 방치된" 파일 top-N (읽기 전용 랭킹).
+    @Published var staleFiles: [BigFile] = []
     @Published var stats: ScanStatsInfo?
     @Published var scanSeconds: Double?
     @Published var scanStartedAt = Date()
@@ -37,6 +39,7 @@ final class AppModel: ObservableObject {
                 self.scanSeconds = Date().timeIntervalSince(started)
                 self.indexPath = []
                 self.breadcrumb = []
+                self.staleFiles = handle.staleFiles(limit: 20, minAgeDays: Self.staleAgeDays)
                 self.reload()
             } catch {
                 self.errorMessage = "\(error)"
@@ -44,6 +47,12 @@ final class AppModel: ObservableObject {
             self.isScanning = false
         }
     }
+
+    /// 방치 파일로 간주하는 최소 경과일.
+    nonisolated static let staleAgeDays: UInt32 = 180
+
+    /// 스캔 시 개별 파일로 기록하는 최소 크기(MiB) — 중복 검사 트리 재사용 조건의 기준.
+    nonisolated static let scanRecordMinFileMib: UInt64 = 50
 
     /// 스냅샷 DB 경로 (~/Library/Application Support/space-mesh/snapshots.db).
     nonisolated static var dbPath: String {
@@ -59,9 +68,10 @@ final class AppModel: ObservableObject {
     private nonisolated static func runScan(path: String) async throws -> ScanHandle {
         try await Task.detached(priority: .userInitiated) {
             do {
-                return try scanAndSave(path: path, minFileMib: 50, dbPath: Self.dbPath)
+                return try scanAndSave(
+                    path: path, minFileMib: Self.scanRecordMinFileMib, dbPath: Self.dbPath)
             } catch {
-                return try scanPath(path: path, minFileMib: 50)
+                return try scanPath(path: path, minFileMib: Self.scanRecordMinFileMib)
             }
         }.value
     }
@@ -96,6 +106,13 @@ final class AppModel: ObservableObject {
     func fullPath(of node: NodeInfo) -> String? {
         try? handle?.fullPath(indexPath: indexPath + [node.index])
     }
+}
+
+/// modifiedEpoch(unix 초) → "382일" 경과 라벨. 0(알 수 없음)이면 nil.
+func ageDaysLabel(_ modifiedEpoch: Int64) -> String? {
+    guard modifiedEpoch > 0 else { return nil }
+    let days = Int(max(0, Date().timeIntervalSince1970 - Double(modifiedEpoch)) / 86_400)
+    return "\(days)일"
 }
 
 func humanBytes(_ bytes: UInt64) -> String {

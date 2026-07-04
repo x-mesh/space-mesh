@@ -297,6 +297,52 @@ struct ContentView: View {
                     InstrumentLabel(text: "대용량 파일 · 직속")
                 }
             }
+            if !model.staleFiles.isEmpty {
+                Section {
+                    ForEach(model.staleFiles, id: \.path) { file in
+                        HStack(spacing: 8) {
+                            Image(systemName: "clock.badge.exclamationmark")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Theme.warn)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text((file.path as NSString).lastPathComponent)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Theme.text)
+                                    .lineLimit(1)
+                                Text((file.path as NSString).deletingLastPathComponent)
+                                    .font(.pathCell)
+                                    .foregroundStyle(Theme.textFaint)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 1) {
+                                Text(humanBytes(file.allocatedSize))
+                                    .font(.dataCell)
+                                    .foregroundStyle(Theme.textDim)
+                                if let age = ageDaysLabel(file.modifiedEpoch) {
+                                    Text(age)
+                                        .font(.pathCell)
+                                        .foregroundStyle(Theme.warn)
+                                }
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            previewURL = URL(fileURLWithPath: file.path)
+                        }
+                        .contextMenu {
+                            Button("Finder에서 보기") {
+                                NSWorkspace.shared.activateFileViewerSelecting(
+                                    [URL(fileURLWithPath: file.path)])
+                            }
+                        }
+                        .listRowBackground(Theme.bg)
+                    }
+                } header: {
+                    InstrumentLabel(
+                        text: "방치 대용량 · \(AppModel.staleAgeDays)일+ · 크기×방치일 순")
+                }
+            }
         }
         .listStyle(.inset)
         .scrollContentBackground(.hidden)
