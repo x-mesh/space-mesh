@@ -1,0 +1,9 @@
+[package]
+name = "space-scanner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rayon = { workspace = true }
+dashmap = { workspace = true }
+serde = { workspace = true }

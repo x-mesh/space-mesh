@@ -1,0 +1,9 @@
+[package]
+name = "space-dedup"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+space-scanner = { path = "../scanner" }
+rayon = { workspace = true }
+blake3 = "1"

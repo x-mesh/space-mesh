@@ -1,0 +1,25 @@
+[package]
+name = "space-ffi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["staticlib", "cdylib", "lib"]
+name = "space_ffi"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+space-scanner = { path = "../scanner" }
+space-index = { path = "../index" }
+space-rules = { path = "../rules" }
+space-dedup = { path = "../dedup" }
+space-git = { path = "../git" }
+uniffi = "0.29"
+thiserror = "2"

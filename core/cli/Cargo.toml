@@ -1,0 +1,15 @@
+[package]
+name = "space-mesh-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "space-mesh"
+path = "src/main.rs"
+
+[dependencies]
+space-scanner = { path = "../scanner" }
+space-index = { path = "../index" }
+clap = { workspace = true }
+serde_json = { workspace = true }
+libc = "0.2"

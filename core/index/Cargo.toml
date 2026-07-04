@@ -1,0 +1,8 @@
+[package]
+name = "space-index"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+space-scanner = { path = "../scanner" }
+rusqlite = { version = "0.32", features = ["bundled"] }

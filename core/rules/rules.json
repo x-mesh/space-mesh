@@ -1,0 +1,195 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "xcode-derived-data",
+      "title": "Xcode DerivedData",
+      "category": "developer",
+      "path": "~/Library/Developer/Xcode/DerivedData",
+      "safety": "safe",
+      "description": "Xcode 빌드 중간 산출물. 삭제해도 다음 빌드에서 재생성됩니다 (빌드 시간만 증가).",
+      "recreate_command": "",
+      "recreate_cost": "high"
+    },
+    {
+      "id": "xcode-archives",
+      "title": "Xcode Archives",
+      "category": "developer",
+      "path": "~/Library/Developer/Xcode/Archives",
+      "safety": "warn",
+      "description": "배포용 아카이브. App Store 제출 이력이 필요하면 보관하세요.",
+      "recreate_command": "",
+      "recreate_cost": "low"
+    },
+    {
+      "id": "xcode-device-support",
+      "title": "iOS DeviceSupport",
+      "category": "developer",
+      "path": "~/Library/Developer/Xcode/iOS DeviceSupport",
+      "safety": "safe",
+      "description": "연결했던 기기의 디버그 심볼. 기기를 다시 연결하면 재생성됩니다.",
+      "recreate_command": "",
+      "recreate_cost": "low"
+    },
+    {
+      "id": "core-simulator-caches",
+      "title": "CoreSimulator Caches",
+      "category": "developer",
+      "path": "~/Library/Developer/CoreSimulator/Caches",
+      "safety": "safe",
+      "description": "시뮬레이터 캐시. 재생성 가능합니다.",
+      "recreate_command": "",
+      "recreate_cost": "low"
+    },
+    {
+      "id": "core-simulator-devices",
+      "title": "CoreSimulator Devices",
+      "category": "developer",
+      "path": "~/Library/Developer/CoreSimulator/Devices",
+      "safety": "warn",
+      "description": "시뮬레이터 기기 데이터. 삭제 시 시뮬레이터 내 앱/데이터가 사라집니다. xcrun simctl delete unavailable 권장.",
+      "recreate_command": "xcrun simctl create ...  # 필요 시 재생성",
+      "recreate_cost": "medium"
+    },
+    {
+      "id": "homebrew-cache",
+      "title": "Homebrew 다운로드 캐시",
+      "category": "package-manager",
+      "path": "~/Library/Caches/Homebrew",
+      "safety": "safe",
+      "description": "brew가 내려받은 설치 파일 캐시. brew cleanup과 동일한 효과.",
+      "recreate_command": "",
+      "recreate_cost": "low"
+    },
+    {
+      "id": "npm-cache",
+      "title": "npm 캐시",
+      "category": "package-manager",
+      "path": "~/.npm/_cacache",
+      "safety": "safe",
+      "description": "npm 패키지 캐시. 다음 install 때 다시 내려받습니다.",
+      "recreate_command": "",
+      "recreate_cost": "low"
+    },
+    {
+      "id": "yarn-cache",
+      "title": "Yarn 캐시",
+      "category": "package-manager",
+      "path": "~/Library/Caches/Yarn",
+      "safety": "safe",
+      "description": "Yarn 패키지 캐시. 재생성 가능합니다.",
+      "recreate_command": "",
+      "recreate_cost": "low"
+    },
+    {
+      "id": "pnpm-store",
+      "title": "pnpm store",
+      "category": "package-manager",
+      "path": "~/Library/pnpm/store",
+      "safety": "warn",
+      "description": "pnpm 전역 저장소. 삭제하면 모든 프로젝트가 다시 내려받습니다.",
+      "recreate_command": "pnpm install  # 각 프로젝트에서",
+      "recreate_cost": "medium"
+    },
+    {
+      "id": "pip-cache",
+      "title": "pip 캐시",
+      "category": "package-manager",
+      "path": "~/Library/Caches/pip",
+      "safety": "safe",
+      "description": "pip 다운로드 캐시. 재생성 가능합니다.",
+      "recreate_command": "",
+      "recreate_cost": "low"
+    },
+    {
+      "id": "cargo-registry-cache",
+      "title": "Cargo registry 캐시",
+      "category": "package-manager",
+      "path": "~/.cargo/registry/cache",
+      "safety": "safe",
+      "description": "crates.io에서 받은 .crate 파일 캐시. 다음 빌드에서 재다운로드됩니다.",
+      "recreate_command": "",
+      "recreate_cost": "low"
+    },
+    {
+      "id": "gradle-caches",
+      "title": "Gradle 캐시",
+      "category": "package-manager",
+      "path": "~/.gradle/caches",
+      "safety": "safe",
+      "description": "Gradle 의존성/빌드 캐시. 재생성 가능합니다.",
+      "recreate_command": "",
+      "recreate_cost": "medium"
+    },
+    {
+      "id": "user-caches",
+      "title": "사용자 앱 캐시 (~/Library/Caches)",
+      "category": "cache",
+      "path": "~/Library/Caches",
+      "safety": "warn",
+      "description": "앱별 캐시 전체. 대부분 재생성되지만 일부 앱은 재로그인/재다운로드가 필요할 수 있습니다.",
+      "recreate_command": "",
+      "recreate_cost": "low"
+    },
+    {
+      "id": "user-logs",
+      "title": "사용자 로그 (~/Library/Logs)",
+      "category": "log",
+      "path": "~/Library/Logs",
+      "safety": "safe",
+      "description": "앱 진단 로그. 문제 분석 중이 아니라면 삭제해도 무방합니다.",
+      "recreate_command": "",
+      "recreate_cost": "low"
+    },
+    {
+      "id": "trash",
+      "title": "휴지통",
+      "category": "trash",
+      "path": "~/.Trash",
+      "safety": "warn",
+      "description": "휴지통 비우기 — 여기서 지우면 복구할 수 없습니다.",
+      "recreate_command": "",
+      "recreate_cost": "low"
+    },
+    {
+      "id": "docker-data",
+      "title": "Docker Desktop 디스크 이미지",
+      "category": "developer",
+      "path": "~/Library/Containers/com.docker.docker/Data/vms",
+      "safety": "warn",
+      "description": "Docker VM 디스크. 삭제하면 모든 이미지/컨테이너/볼륨이 사라집니다. docker system prune 권장.",
+      "recreate_command": "docker pull / docker compose up  # 이미지 재다운로드",
+      "recreate_cost": "high"
+    },
+    {
+      "id": "mise-installs",
+      "title": "mise 런타임",
+      "category": "developer",
+      "path": "~/.local/share/mise/installs",
+      "safety": "warn",
+      "description": "mise로 설치한 언어 런타임. 사용 중인 버전은 지우지 마세요.",
+      "recreate_command": "mise install",
+      "recreate_cost": "medium"
+    },
+    {
+      "id": "ollama-models",
+      "title": "Ollama 모델",
+      "category": "ml-models",
+      "path": "~/.ollama/models",
+      "safety": "warn",
+      "description": "로컬 LLM 모델 파일. 다시 받으려면 수 GB 다운로드가 필요합니다.",
+      "recreate_command": "ollama pull <model>",
+      "recreate_cost": "high"
+    },
+    {
+      "id": "huggingface-cache",
+      "title": "HuggingFace 캐시",
+      "category": "ml-models",
+      "path": "~/.cache/huggingface",
+      "safety": "warn",
+      "description": "HF 모델/데이터셋 캐시. 재다운로드 비용이 큽니다.",
+      "recreate_command": "huggingface-cli download <model>  # 재다운로드",
+      "recreate_cost": "high"
+    }
+  ]
+}
