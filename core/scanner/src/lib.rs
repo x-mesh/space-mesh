@@ -13,6 +13,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// 이 개수 이상 항목을 가진 청크는 lstat을 병렬로 수행한다 (PERF-003A).
+/// 소형 디렉토리는 rayon 오버헤드가 syscall 절약보다 커서 순차가 빠르다.
+const PAR_LSTAT_MIN_ENTRIES: usize = 512;
+
+/// readdir 청크 크기 — DirEntry(항목당 수백 B)는 이 개수 이상 쌓이지 않는다.
+/// 대형 디렉토리도 청크 단위로 lstat→축약을 반복해 peak RSS에 상한을 건다.
+const PAR_LSTAT_CHUNK: usize = 4096;
+
 /// 스캔 옵션.
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
@@ -66,6 +74,42 @@ pub struct ScanStats {
 pub struct ScanResult {
     pub root: DirNode,
     pub stats: ScanStats,
+}
+
+/// 집계에 필요한 최소 파일 메타 — lstat 결과에서 즉시 축약해 DirEntry를 버린다.
+/// path는 record_file_threshold 이상 파일만 보유한다 (소형 파일은 힙 할당 0).
+struct FileMeta {
+    logical: u64,
+    alloc: u64,
+    dev: u64,
+    ino: u64,
+    nlink: u64,
+    mtime: i64,
+    path: Option<PathBuf>,
+}
+
+/// lstat 직후의 항목 분류 결과. Dir은 재귀에 Metadata가 필요해 유지한다
+/// (디렉토리 수는 파일 수보다 한 자릿수 이상 적다).
+enum Scanned {
+    Dir(PathBuf, String, fs::Metadata),
+    File(FileMeta),
+}
+
+fn classify(entry: fs::DirEntry, md: fs::Metadata, threshold: u64) -> Scanned {
+    if md.is_dir() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        Scanned::Dir(entry.path(), name, md)
+    } else {
+        Scanned::File(FileMeta {
+            logical: md.len(),
+            alloc: md.blocks() * 512,
+            dev: md.dev(),
+            ino: md.ino(),
+            nlink: md.nlink(),
+            mtime: md.mtime(),
+            path: (md.len() >= threshold).then(|| entry.path()),
+        })
+    }
 }
 
 struct Ctx {
@@ -148,45 +192,85 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
         }
     };
 
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => {
-                ctx.errors.fetch_add(1, Ordering::Relaxed);
-                continue;
+    // ①+② readdir을 청크 단위로 소비하며 lstat→축약(classify)을 반복한다.
+    // - 큰 청크(≥512)는 lstat 병렬 (PERF-003A) — 하위 디렉토리 병렬 재귀가
+    //   못 덮는 "한 디렉토리에 파일 수만 개" 케이스를 잡는다.
+    // - DirEntry(항목당 수백 B + 이름 힙)는 청크 버퍼(≤4096) 이상 쌓이지 않고,
+    //   축약된 Scanned(~80B, 소형 파일은 힙 0)만 남긴다 — (DirEntry, Metadata)
+    //   쌍을 디렉토리 전량 보유하면 대형 트리에서 peak RSS가 GB급으로 치솟는다
+    //   (실측 71MB → 1.98GB 회귀를 되돌린 수정).
+    // - DirEntry::metadata는 심볼릭 링크를 따라가지 않는다 (lstat 상당).
+    let threshold = ctx.opts.record_file_threshold;
+    let mut entries = entries;
+    let mut buf: Vec<fs::DirEntry> = Vec::new();
+    let mut chunk: Vec<Scanned> = Vec::new();
+    loop {
+        for entry in entries.by_ref() {
+            match entry {
+                Ok(e) => {
+                    buf.push(e);
+                    if buf.len() >= PAR_LSTAT_CHUNK {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    ctx.errors.fetch_add(1, Ordering::Relaxed);
+                }
             }
-        };
-        // DirEntry::metadata는 심볼릭 링크를 따라가지 않는다 (lstat 상당).
-        let md = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => {
-                ctx.errors.fetch_add(1, Ordering::Relaxed);
-                continue;
+        }
+        if buf.is_empty() {
+            break;
+        }
+        if buf.len() >= PAR_LSTAT_MIN_ENTRIES {
+            let results: Vec<Option<Scanned>> = buf
+                .par_drain(..)
+                .map(|e| {
+                    let md = e.metadata().ok()?;
+                    Some(classify(e, md, threshold))
+                })
+                .collect();
+            let failed = results.iter().filter(|r| r.is_none()).count() as u64;
+            if failed > 0 {
+                ctx.errors.fetch_add(failed, Ordering::Relaxed);
             }
-        };
-
-        if md.is_dir() {
-            if ctx.opts.one_filesystem && md.dev() != ctx.root_dev {
-                continue;
-            }
-            let child_name = entry.file_name().to_string_lossy().into_owned();
-            subdirs.push((entry.path(), child_name, md));
+            chunk.extend(results.into_iter().flatten());
         } else {
-            // 하드링크는 최초 발견 시 한 번만 집계 (du와 동일).
-            if md.nlink() > 1 && !ctx.seen_hardlinks.insert((md.dev(), md.ino())) {
-                continue;
+            for e in buf.drain(..) {
+                match e.metadata() {
+                    Ok(md) => chunk.push(classify(e, md, threshold)),
+                    Err(_) => {
+                        ctx.errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
-            let alloc = md.blocks() * 512;
-            logical += md.len();
-            allocated += alloc;
-            file_count += 1;
-            if md.len() >= ctx.opts.record_file_threshold {
-                big_files.push(FileEntry {
-                    path: entry.path(),
-                    logical_size: md.len(),
-                    allocated_size: alloc,
-                    modified_epoch: md.mtime(),
-                });
+        }
+
+        // ③ 집계 — 청크 즉시 소비 (축약 항목도 디렉토리 전량을 들고 있지 않는다).
+        for item in chunk.drain(..) {
+            match item {
+                Scanned::Dir(child_path, child_name, md) => {
+                    if ctx.opts.one_filesystem && md.dev() != ctx.root_dev {
+                        continue;
+                    }
+                    subdirs.push((child_path, child_name, md));
+                }
+                Scanned::File(f) => {
+                    // 하드링크는 최초 발견 시 한 번만 집계 (du와 동일).
+                    if f.nlink > 1 && !ctx.seen_hardlinks.insert((f.dev, f.ino)) {
+                        continue;
+                    }
+                    logical += f.logical;
+                    allocated += f.alloc;
+                    file_count += 1;
+                    if let Some(path) = f.path {
+                        big_files.push(FileEntry {
+                            path,
+                            logical_size: f.logical,
+                            allocated_size: f.alloc,
+                            modified_epoch: f.mtime,
+                        });
+                    }
+                }
             }
         }
     }
@@ -323,6 +407,27 @@ mod tests {
         // 하드링크 쌍은 한 번만 집계된다.
         assert_eq!(result.stats.total_files, 1);
         assert_eq!(result.root.logical_size, 40_000);
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn flat_dir_above_par_threshold_counts_correctly() {
+        // PAR_LSTAT_MIN_ENTRIES(512) 초과 평면 디렉토리 — 병렬 lstat 경로 검증.
+        let tmp = std::env::temp_dir().join(format!("space-mesh-flat-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let n = PAR_LSTAT_MIN_ENTRIES + 88;
+        for i in 0..n {
+            write_file(&tmp.join(format!("f{:04}.bin", i)), 100);
+        }
+        // 하드링크 쌍 하나 — 병렬 경로에서도 1회만 집계되는지 확인.
+        fs::hard_link(tmp.join("f0000.bin"), tmp.join("hardlink.bin")).unwrap();
+
+        let result = scan(&tmp, ScanOptions::default()).unwrap();
+        assert_eq!(result.stats.total_files, n as u64); // 링크는 +1 안 됨
+        assert_eq!(result.root.logical_size, (n * 100) as u64);
+        assert_eq!(result.stats.errors, 0);
 
         fs::remove_dir_all(&tmp).unwrap();
     }
