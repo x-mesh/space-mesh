@@ -97,7 +97,7 @@ pub fn detect_with_rules(home: &Path, rules: &[Rule]) -> Vec<Candidate> {
             })
         })
         .collect();
-    candidates.sort_by(|a, b| b.allocated_size.cmp(&a.allocated_size));
+    candidates.sort_by_key(|f| std::cmp::Reverse(f.allocated_size));
     candidates
 }
 

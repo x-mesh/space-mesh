@@ -207,7 +207,7 @@ fn match_def(name: &str) -> Option<&'static CategoryDef> {
 pub fn find_categories(root: &DirNode, root_path: &Path) -> Vec<CategoryHit> {
     let mut hits = Vec::new();
     walk(root, root_path, &mut hits);
-    hits.sort_by(|a, b| b.allocated_size.cmp(&a.allocated_size));
+    hits.sort_by_key(|f| std::cmp::Reverse(f.allocated_size));
     hits
 }
 
