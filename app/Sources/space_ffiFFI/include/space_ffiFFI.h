@@ -331,6 +331,11 @@ RustBuffer uniffi_space_ffi_fn_method_scanhandle_node_at(void*_Nonnull ptr, Rust
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_reclaim_summary(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_RESCAN_PATHS
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_RESCAN_PATHS
+RustBuffer uniffi_space_ffi_fn_method_scanhandle_rescan_paths(void*_Nonnull ptr, RustBuffer paths, uint64_t min_file_mib, RustBuffer db_path, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_STALE_FILES
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_STALE_FILES
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_stale_files(void*_Nonnull ptr, uint32_t limit, uint32_t min_age_days, RustCallStatus *_Nonnull out_status
@@ -818,6 +823,12 @@ uint16_t uniffi_space_ffi_checksum_method_scanhandle_node_at(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_RECLAIM_SUMMARY
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_RECLAIM_SUMMARY
 uint16_t uniffi_space_ffi_checksum_method_scanhandle_reclaim_summary(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_RESCAN_PATHS
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_RESCAN_PATHS
+uint16_t uniffi_space_ffi_checksum_method_scanhandle_rescan_paths(void
     
 );
 #endif

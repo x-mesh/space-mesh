@@ -77,6 +77,9 @@ pub struct ScanHandle {
     root_path: PathBuf,
     root: DirNode,
     stats: ScanStatsInfo,
+    /// 증분 재스캔용 하드링크 레지스트리. None = 스냅샷 로드 핸들
+    /// (레지스트리 없음 → rescan_paths가 항상 풀스캔으로 강등).
+    hardlinks: Option<space_scanner::merge::HardlinkRegistry>,
 }
 
 impl ScanHandle {
@@ -196,6 +199,7 @@ pub fn scan_path(path: String, min_file_mib: u64) -> Result<Arc<ScanHandle>, Sca
             errors: result.stats.errors,
         },
         root: result.root,
+        hardlinks: Some(result.hardlinks),
     }))
 }
 
@@ -223,6 +227,7 @@ pub fn load_snapshot(db_path: String, root_path: String) -> Result<Arc<ScanHandl
             errors: 0,
         },
         root,
+        hardlinks: None,
     }))
 }
 
@@ -262,7 +267,149 @@ pub fn scan_and_save(
             errors: result.stats.errors,
         },
         root: result.root,
+        hardlinks: Some(result.hardlinks),
     }))
+}
+
+// ───────────────────────── M4: 증분 재스캔 ─────────────────────────
+
+/// rescan_paths 결과 — handle은 병합(또는 강등 풀스캔)이 반영된 새 핸들.
+#[derive(uniffi::Record)]
+pub struct RescanReport {
+    pub handle: Arc<ScanHandle>,
+    /// true면 증분이 아니라 풀스캔으로 강등됨 (reason 참조).
+    pub degraded: bool,
+    pub degrade_reason: String,
+    /// 증분 병합된 서브트리 수 (강등 시 0).
+    pub rescanned_dirs: u32,
+}
+
+#[uniffi::export]
+impl ScanHandle {
+    /// 변경 디렉토리들만 재스캔해 병합한 새 핸들을 반환한다 (M4 증분).
+    /// 정확성을 증분으로 보장할 수 없으면 내부에서 풀스캔으로 강등한다 —
+    /// 반환 핸들은 어느 경로든 항상 올바르다. db_path가 비어 있지 않으면
+    /// 스냅샷 저장 + 프루닝까지 수행한다 (기존 scan_and_save와 동일 계약).
+    pub fn rescan_paths(
+        &self,
+        paths: Vec<String>,
+        min_file_mib: u64,
+        db_path: String,
+    ) -> Result<RescanReport, ScanError> {
+        let opts = ScanOptions {
+            record_file_threshold: min_file_mib * 1024 * 1024,
+            ..Default::default()
+        };
+
+        let Some(registry0) = &self.hardlinks else {
+            return self.rescan_full(&opts, &db_path, "no hardlink registry (snapshot handle)");
+        };
+
+        // 방어적 정규화: 정렬 후 포함관계 병합 (/a가 있으면 /a/b 제거).
+        let mut sorted: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+        sorted.sort();
+        let mut targets: Vec<PathBuf> = Vec::new();
+        for p in sorted {
+            if !targets.iter().any(|t| p.starts_with(t)) {
+                targets.push(p);
+            }
+        }
+
+        let mut root = self.root.clone(); // 실측 ~10ms @ 217k dirs (M1 스파이크)
+        let mut stats = space_scanner::ScanStats {
+            errors: self.stats.errors,
+            total_files: self.stats.total_files,
+            total_dirs: self.stats.total_dirs,
+        };
+        let mut registry = registry0.clone();
+        let mut merged = 0u32;
+        for t in &targets {
+            use space_scanner::merge::{rescan_and_merge, MergeVerdict};
+            match rescan_and_merge(&mut root, &self.root_path, &mut stats, &mut registry, t, &opts)
+            {
+                Ok(MergeVerdict::Merged { .. }) => merged += 1,
+                Ok(MergeVerdict::Degrade(reason)) => {
+                    return self.rescan_full(&opts, &db_path, &reason)
+                }
+                Err(e) => return self.rescan_full(&opts, &db_path, &format!("io: {e}")),
+            }
+        }
+
+        let handle = Arc::new(ScanHandle {
+            root_path: self.root_path.clone(),
+            stats: ScanStatsInfo {
+                total_files: stats.total_files,
+                total_dirs: stats.total_dirs,
+                errors: stats.errors,
+            },
+            root,
+            hardlinks: Some(registry),
+        });
+        handle.save_to_db(&db_path)?;
+        Ok(RescanReport {
+            handle,
+            degraded: false,
+            degrade_reason: String::new(),
+            rescanned_dirs: merged,
+        })
+    }
+}
+
+impl ScanHandle {
+    /// 강등 경로 — 전체 풀스캔으로 항상-올바른 새 핸들을 만든다.
+    fn rescan_full(
+        &self,
+        opts: &ScanOptions,
+        db_path: &str,
+        reason: &str,
+    ) -> Result<RescanReport, ScanError> {
+        let result = scan_with_progress(&self.root_path, opts.clone(), Some(reset_progress()))
+            .map_err(|e| ScanError::Io { msg: e.to_string() })?;
+        let handle = Arc::new(ScanHandle {
+            root_path: self.root_path.clone(),
+            stats: ScanStatsInfo {
+                total_files: result.stats.total_files,
+                total_dirs: result.stats.total_dirs,
+                errors: result.stats.errors,
+            },
+            root: result.root,
+            hardlinks: Some(result.hardlinks),
+        });
+        handle.save_to_db(db_path)?;
+        Ok(RescanReport {
+            handle,
+            degraded: true,
+            degrade_reason: reason.to_string(),
+            rescanned_dirs: 0,
+        })
+    }
+
+    /// 트리를 스냅샷으로 저장(+프루닝). db_path가 비면 no-op.
+    fn save_to_db(&self, db_path: &str) -> Result<(), ScanError> {
+        if db_path.is_empty() {
+            return Ok(());
+        }
+        let mut conn = space_index::open(Path::new(db_path))
+            .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+        let result = space_scanner::ScanResult {
+            root: self.root.clone(),
+            stats: space_scanner::ScanStats {
+                errors: self.stats.errors,
+                total_files: self.stats.total_files,
+                total_dirs: self.stats.total_dirs,
+            },
+            hardlinks: Default::default(),
+            preseen_hits: Default::default(),
+        };
+        space_index::save_snapshot(&mut conn, &self.root_path, &result)
+            .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+        let _ = space_index::prune_snapshots(
+            &mut conn,
+            &self.root_path,
+            space_index::DEFAULT_KEEP_SNAPSHOTS,
+        );
+        Ok(())
+    }
 }
 
 // ───────────────────────── M3: 불필요 파일 탐지 + 중복 탐지 ─────────────────────────

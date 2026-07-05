@@ -738,6 +738,14 @@ public protocol ScanHandleProtocol: AnyObject, Sendable {
     func reclaimSummary()  -> ReclaimSummary
     
     /**
+     * 변경 디렉토리들만 재스캔해 병합한 새 핸들을 반환한다 (M4 증분).
+     * 정확성을 증분으로 보장할 수 없으면 내부에서 풀스캔으로 강등한다 —
+     * 반환 핸들은 어느 경로든 항상 올바르다. db_path가 비어 있지 않으면
+     * 스냅샷 저장 + 프루닝까지 수행한다 (기존 scan_and_save와 동일 계약).
+     */
+    func rescanPaths(paths: [String], minFileMib: UInt64, dbPath: String) throws  -> RescanReport
+    
+    /**
      * 트리 전체에서 "크고 오래 방치된" 파일 top-N (점수 = allocated × 방치일).
      * min_age_days 이상 수정이 없던 파일만 포함한다. 랭킹은 읽기 전용 —
      * 삭제는 UI의 기존 안전망(가드 + 휴지통 + undo)을 거친다.
@@ -907,6 +915,22 @@ open func nodeAt(indexPath: [UInt32])throws  -> NodeInfo  {
 open func reclaimSummary() -> ReclaimSummary  {
     return try!  FfiConverterTypeReclaimSummary_lift(try! rustCall() {
     uniffi_space_ffi_fn_method_scanhandle_reclaim_summary(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * 변경 디렉토리들만 재스캔해 병합한 새 핸들을 반환한다 (M4 증분).
+     * 정확성을 증분으로 보장할 수 없으면 내부에서 풀스캔으로 강등한다 —
+     * 반환 핸들은 어느 경로든 항상 올바르다. db_path가 비어 있지 않으면
+     * 스냅샷 저장 + 프루닝까지 수행한다 (기존 scan_and_save와 동일 계약).
+     */
+open func rescanPaths(paths: [String], minFileMib: UInt64, dbPath: String)throws  -> RescanReport  {
+    return try  FfiConverterTypeRescanReport_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_method_scanhandle_rescan_paths(self.uniffiClonePointer(),
+        FfiConverterSequenceString.lower(paths),
+        FfiConverterUInt64.lower(minFileMib),
+        FfiConverterString.lower(dbPath),$0
     )
 })
 }
@@ -2227,6 +2251,81 @@ public func FfiConverterTypeReclaimSummary_lower(_ value: ReclaimSummary) -> Rus
 }
 
 
+/**
+ * rescan_paths 결과 — handle은 병합(또는 강등 풀스캔)이 반영된 새 핸들.
+ */
+public struct RescanReport {
+    public var handle: ScanHandle
+    /**
+     * true면 증분이 아니라 풀스캔으로 강등됨 (reason 참조).
+     */
+    public var degraded: Bool
+    public var degradeReason: String
+    /**
+     * 증분 병합된 서브트리 수 (강등 시 0).
+     */
+    public var rescannedDirs: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(handle: ScanHandle, 
+        /**
+         * true면 증분이 아니라 풀스캔으로 강등됨 (reason 참조).
+         */degraded: Bool, degradeReason: String, 
+        /**
+         * 증분 병합된 서브트리 수 (강등 시 0).
+         */rescannedDirs: UInt32) {
+        self.handle = handle
+        self.degraded = degraded
+        self.degradeReason = degradeReason
+        self.rescannedDirs = rescannedDirs
+    }
+}
+
+#if compiler(>=6)
+extension RescanReport: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRescanReport: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RescanReport {
+        return
+            try RescanReport(
+                handle: FfiConverterTypeScanHandle.read(from: &buf), 
+                degraded: FfiConverterBool.read(from: &buf), 
+                degradeReason: FfiConverterString.read(from: &buf), 
+                rescannedDirs: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RescanReport, into buf: inout [UInt8]) {
+        FfiConverterTypeScanHandle.write(value.handle, into: &buf)
+        FfiConverterBool.write(value.degraded, into: &buf)
+        FfiConverterString.write(value.degradeReason, into: &buf)
+        FfiConverterUInt32.write(value.rescannedDirs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRescanReport_lift(_ buf: RustBuffer) throws -> RescanReport {
+    return try FfiConverterTypeRescanReport.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRescanReport_lower(_ value: RescanReport) -> RustBuffer {
+    return FfiConverterTypeRescanReport.lower(value)
+}
+
+
 public struct ScanStatsInfo {
     public var totalFiles: UInt64
     public var totalDirs: UInt64
@@ -3158,6 +3257,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_reclaim_summary() != 64489) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_method_scanhandle_rescan_paths() != 16835) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_stale_files() != 62394) {
