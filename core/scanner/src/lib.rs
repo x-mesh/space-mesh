@@ -4,9 +4,13 @@
 //! logical size(st_size)와 allocated size(st_blocks * 512)를 함께 집계한다.
 //! 하드링크(nlink > 1)는 (dev, ino) 기준으로 한 번만 계산해 du와 동일한 기준을 따른다.
 
-use dashmap::DashSet;
+pub mod merge;
+
+use dashmap::DashMap;
+use merge::HardlinkOwner;
 use rayon::prelude::*;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -40,7 +44,8 @@ impl Default for ScanOptions {
 }
 
 /// 디렉토리 노드. children은 하위 디렉토리만 담는다.
-#[derive(Debug, Serialize)]
+/// Clone은 증분 병합(M4)용 — 비용은 dir_count 규모(파일 수 아님), clone_bench로 실측.
+#[derive(Debug, Clone, Serialize)]
 pub struct DirNode {
     pub name: String,
     pub logical_size: u64,
@@ -74,6 +79,12 @@ pub struct ScanStats {
 pub struct ScanResult {
     pub root: DirNode,
     pub stats: ScanStats,
+    /// nlink>1 파일의 (dev, ino) → 최초 집계 소유자 — 증분 병합(M4)의
+    /// 하드링크 레지스트리. 희소(실측 0~0.6%)해서 메모리 부담 없음.
+    pub hardlinks: merge::HardlinkRegistry,
+    /// 증분 재스캔 전용: preseen으로 스킵한 링크의 (dev,ino) → 관측 (logical, alloc).
+    /// 병합기가 레지스트리 기록과 대조해 "비소유자 경로 내용 수정"(d)을 감지한다.
+    pub preseen_hits: std::collections::HashMap<(u64, u64), (u64, u64)>,
 }
 
 /// 집계에 필요한 최소 파일 메타 — lstat 결과에서 즉시 축약해 DirEntry를 버린다.
@@ -107,7 +118,9 @@ fn classify(entry: fs::DirEntry, md: fs::Metadata, threshold: u64) -> Scanned {
             ino: md.ino(),
             nlink: md.nlink(),
             mtime: md.mtime(),
-            path: (md.len() >= threshold).then(|| entry.path()),
+            // 하드링크(nlink>1)는 크기와 무관하게 경로 보유 — 레지스트리 소유자
+            // 기록에 필요하다 (희소해서 힙 부담 없음).
+            path: (md.len() >= threshold || md.nlink() > 1).then(|| entry.path()),
         })
     }
 }
@@ -115,8 +128,13 @@ fn classify(entry: fs::DirEntry, md: fs::Metadata, threshold: u64) -> Scanned {
 struct Ctx {
     opts: ScanOptions,
     root_dev: u64,
-    /// nlink > 1 파일의 (dev, ino) — 최초 1회만 크기 집계.
-    seen_hardlinks: DashSet<(u64, u64)>,
+    /// nlink > 1 파일의 (dev, ino) → 최초 집계 소유자 — 최초 1회만 크기 집계.
+    seen_hardlinks: DashMap<(u64, u64), HardlinkOwner>,
+    /// 증분 재스캔 전용: 이 서브트리 밖에서 이미 집계된 (dev, ino) —
+    /// 여기 있으면 이번 스캔에서 집계하지 않는다 (이중 계산 차단).
+    preseen: Option<Arc<HashSet<(u64, u64)>>>,
+    /// preseen 스킵 시의 관측 크기 기록 — (d)비소유자 경로 수정 감지용.
+    preseen_hits: DashMap<(u64, u64), (u64, u64)>,
     errors: AtomicU64,
     total_files: AtomicU64,
     total_dirs: AtomicU64,
@@ -135,6 +153,16 @@ pub fn scan_with_progress(
     opts: ScanOptions,
     progress: Option<Arc<AtomicU64>>,
 ) -> std::io::Result<ScanResult> {
+    scan_internal(root, opts, progress, None)
+}
+
+/// 내부 공통 스캔 — preseen은 증분 병합(merge)의 서브트리 재스캔 전용.
+pub(crate) fn scan_internal(
+    root: &Path,
+    opts: ScanOptions,
+    progress: Option<Arc<AtomicU64>>,
+    preseen: Option<Arc<HashSet<(u64, u64)>>>,
+) -> std::io::Result<ScanResult> {
     let root_md = fs::symlink_metadata(root)?;
     if !root_md.is_dir() {
         return Err(std::io::Error::new(
@@ -145,7 +173,9 @@ pub fn scan_with_progress(
     let ctx = Ctx {
         opts,
         root_dev: root_md.dev(),
-        seen_hardlinks: DashSet::new(),
+        seen_hardlinks: DashMap::new(),
+        preseen,
+        preseen_hits: DashMap::new(),
         errors: AtomicU64::new(0),
         total_files: AtomicU64::new(0),
         total_dirs: AtomicU64::new(0),
@@ -163,6 +193,8 @@ pub fn scan_with_progress(
             total_files: ctx.total_files.load(Ordering::Relaxed),
             total_dirs: ctx.total_dirs.load(Ordering::Relaxed),
         },
+        hardlinks: ctx.seen_hardlinks.into_iter().collect(),
+        preseen_hits: ctx.preseen_hits.into_iter().collect(),
     })
 }
 
@@ -256,19 +288,44 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
                 }
                 Scanned::File(f) => {
                     // 하드링크는 최초 발견 시 한 번만 집계 (du와 동일).
-                    if f.nlink > 1 && !ctx.seen_hardlinks.insert((f.dev, f.ino)) {
-                        continue;
+                    if f.nlink > 1 {
+                        // 증분 재스캔: 서브트리 밖에서 이미 집계된 링크는 스킵.
+                        if let Some(pre) = &ctx.preseen {
+                            if pre.contains(&(f.dev, f.ino)) {
+                                ctx.preseen_hits
+                                    .insert((f.dev, f.ino), (f.logical, f.alloc));
+                                continue;
+                            }
+                        }
+                        use dashmap::mapref::entry::Entry;
+                        match ctx.seen_hardlinks.entry((f.dev, f.ino)) {
+                            Entry::Occupied(mut o) => {
+                                o.get_mut().seen += 1;
+                                continue;
+                            }
+                            Entry::Vacant(v) => {
+                                v.insert(HardlinkOwner {
+                                    path: f.path.clone().unwrap_or_default(),
+                                    logical: f.logical,
+                                    alloc: f.alloc,
+                                    nlink: f.nlink,
+                                    seen: 1,
+                                });
+                            }
+                        }
                     }
                     logical += f.logical;
                     allocated += f.alloc;
                     file_count += 1;
-                    if let Some(path) = f.path {
-                        big_files.push(FileEntry {
-                            path,
-                            logical_size: f.logical,
-                            allocated_size: f.alloc,
-                            modified_epoch: f.mtime,
-                        });
+                    if f.logical >= threshold {
+                        if let Some(path) = f.path {
+                            big_files.push(FileEntry {
+                                path,
+                                logical_size: f.logical,
+                                allocated_size: f.alloc,
+                                modified_epoch: f.mtime,
+                            });
+                        }
                     }
                 }
             }
