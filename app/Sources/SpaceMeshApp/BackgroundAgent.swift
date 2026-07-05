@@ -122,9 +122,34 @@ final class BackgroundAgent: ObservableObject {
     private var watchRoot = ""
     private var budgetBytes: UInt64 = 0
 
+    // MARK: 증분 재집계 상태 (M4)
+
+    /// 마지막 재집계의 핸들 — 증분 rescan의 베이스. nil이면 풀스캔.
+    private var lastHandle: ScanHandle?
+    /// debounce 창 동안 누적된 변경 디렉토리 경로 (FSEvents 기본 = 디렉토리 단위).
+    private var pendingPaths: Set<String> = []
+    /// MustScanSubDirs(드롭 동반)/RootChanged/Mount/Unmount 감지 — 다음 재집계는 풀스캔.
+    private var forceFullScan = false
+    /// 재베이스 정책: 증분 100회 또는 24시간마다 풀스캔 (Syncthing/Watchman 선례).
+    private var incrementalCount = 0
+    private var lastFullScanAt = Date.distantPast
+    private static let rebaseEveryIncrements = 100
+    private static let rebaseInterval: TimeInterval = 24 * 3600
+
+    /// 풀스캔 강등 신호 플래그 (Apple 가이드: MustScanSubDirs만 봐도 드롭 케이스 커버).
+    private static let degradeFlags: FSEventStreamEventFlags = FSEventStreamEventFlags(
+        kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagRootChanged
+            | kFSEventStreamEventFlagMount | kFSEventStreamEventFlagUnmount)
+
     private func startLiveWatch(root: String, budgetGiB: Double) {
         watchRoot = root
         budgetBytes = budgetGiB > 0 ? UInt64(budgetGiB * 1_073_741_824) : 0
+        // 증분 상태 리셋 — 첫 재집계는 항상 풀스캔(베이스 확보).
+        lastHandle = nil
+        pendingPaths = []
+        forceFullScan = false
+        incrementalCount = 0
+        lastFullScanAt = .distantPast
 
         var context = FSEventStreamContext(
             version: 0,
@@ -132,16 +157,23 @@ final class BackgroundAgent: ObservableObject {
             retain: nil, release: nil, copyDescription: nil)
 
         // latency 10초 — 이벤트를 커널이 모아서 배치로 전달(wakeup 최소화).
+        // UseCFTypes: 콜백의 eventPaths를 CFArray<CFString>으로 받아 증분 대상 수집.
         let flags = UInt32(
-            kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot)
+            kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot
+                | kFSEventStreamCreateFlagUseCFTypes)
         guard
             let stream = FSEventStreamCreate(
                 kCFAllocatorDefault,
-                { _, info, _, _, _, _ in
+                { _, info, numEvents, eventPaths, eventFlags, _ in
                     guard let info else { return }
                     let agent = Unmanaged<BackgroundAgent>.fromOpaque(info)
                         .takeUnretainedValue()
-                    Task { @MainActor in agent.onFSEvents() }
+                    // UseCFTypes → CFArray<CFString>. 실패 시 빈 배열(풀스캔 경로).
+                    let paths =
+                        Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue()
+                        as? [String] ?? []
+                    let flagsArr = Array(UnsafeBufferPointer(start: eventFlags, count: numEvents))
+                    Task { @MainActor in agent.onFSEvents(paths: paths, flags: flagsArr) }
                 },
                 &context,
                 [root] as CFArray,
@@ -171,10 +203,21 @@ final class BackgroundAgent: ObservableObject {
         debounceTask?.cancel()
         debounceTask = nil
         pendingSince = nil
+        // 증분 베이스 해제 — live 모드 밖에서는 트리를 상주시키지 않는다.
+        lastHandle = nil
+        pendingPaths = []
     }
 
     /// 이벤트 수신 — 즉시 재집계하지 않고 debounce. IO 폭주 시 오히려 배치가 커져 효율적.
-    private func onFSEvents() {
+    /// 변경 디렉토리 경로를 누적하고, 위험 플래그는 풀스캔 강등으로 표시한다 (M4).
+    private func onFSEvents(paths: [String], flags: [FSEventStreamEventFlags]) {
+        for (i, path) in paths.enumerated() {
+            if i < flags.count && flags[i] & Self.degradeFlags != 0 {
+                forceFullScan = true
+            }
+            pendingPaths.insert(path)
+        }
+        if paths.isEmpty { forceFullScan = true }  // 경로 추출 실패 — 보수적으로 풀스캔
         if pendingSince == nil { pendingSince = Date() }
         scheduleRecompute(delay: 8)
     }
@@ -202,20 +245,62 @@ final class BackgroundAgent: ObservableObject {
         isRecomputing = true
         pendingSince = nil
         let root = watchRoot
-        let handle = try? await Task.detached(priority: .background) {
-            // 스냅샷도 저장해 '변화' 탭에 축적.
-            try scanAndSave(
-                path: root, minFileMib: AppModel.scanRecordMinFileMib, dbPath: AppModel.dbPath)
-        }.value
+
+        // 이번 배치의 변경 경로를 소비 (재집계 중 도착분은 다음 배치로 — 누락 없음).
+        let batch = Array(pendingPaths)
+        pendingPaths = []
+        let mustFull = forceFullScan
+        forceFullScan = false
+
+        // 재베이스 정책: 신뢰 신호가 없어도 주기적으로 풀스캔 (드리프트 정정).
+        let rebaseDue =
+            incrementalCount >= Self.rebaseEveryIncrements
+            || Date().timeIntervalSince(lastFullScanAt) >= Self.rebaseInterval
+        let canIncremental = !mustFull && !rebaseDue && !batch.isEmpty && lastHandle != nil
+
+        var handle: ScanHandle?
+        var statusLabel = ""
+        if canIncremental, let prev = lastHandle {
+            let report = try? await Task.detached(priority: .background) {
+                try prev.rescanPaths(
+                    paths: batch, minFileMib: AppModel.scanRecordMinFileMib,
+                    dbPath: AppModel.dbPath)
+            }.value
+            if let report {
+                handle = report.handle
+                if report.degraded {
+                    incrementalCount = 0
+                    lastFullScanAt = Date()
+                    statusLabel = "강등 풀스캔 (\(report.degradeReason))"
+                } else {
+                    incrementalCount += 1
+                    statusLabel = "증분 재집계 \(report.rescannedDirs)개 서브트리"
+                }
+            }
+        }
+        if handle == nil {
+            // 풀스캔 경로 (최초/강등/재베이스/증분 실패).
+            handle = try? await Task.detached(priority: .background) {
+                // 스냅샷도 저장해 '변화' 탭에 축적.
+                try scanAndSave(
+                    path: root, minFileMib: AppModel.scanRecordMinFileMib,
+                    dbPath: AppModel.dbPath)
+            }.value
+            incrementalCount = 0
+            lastFullScanAt = Date()
+            if statusLabel.isEmpty { statusLabel = rebaseDue ? "재베이스 풀스캔" : "풀스캔" }
+        }
+
         isRecomputing = false
         guard let handle else {
             status = "재집계 실패"
             return
         }
+        lastHandle = handle
         let total = (try? handle.nodeAt(indexPath: []).allocatedSize) ?? 0
         lastTotal = total
         lastUpdated = Date()
-        status = "최근 집계 \(humanBytes(total)) · \(shortNow())"
+        status = "\(statusLabel) · \(humanBytes(total)) · \(shortNow())"
 
         if budgetBytes > 0 && total > budgetBytes {
             notifyBudget(total: total, budget: budgetBytes, root: root)
