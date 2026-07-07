@@ -8,6 +8,7 @@ import SwiftUI
 struct CategoriesView: View {
     @EnvironmentObject var appModel: AppModel
     @ObservedObject var model: CleanupModel
+    @ObservedObject var plan: ReclaimPlan
     let scanTarget: String
 
     @State private var hits: [CategoryHitInfo] = []
@@ -79,7 +80,17 @@ struct CategoriesView: View {
                 undoAvailable: !model.lastBatch.isEmpty,
                 onTrash: { confirmTrash = true },
                 onUndo: { model.undoLastBatch() },
-                onRefresh: { reload() }
+                onRefresh: { reload() },
+                onAddToPlan: {
+                    plan.add(
+                        hits.filter { selected.contains($0.path) }.map {
+                            PlanItem(
+                                path: $0.path, estimatedBytes: $0.allocatedSize,
+                                source: .category, safety: $0.safety,
+                                recreateCommand: $0.recreateCommand)
+                        })
+                    selected = []
+                }
             )
         }
         .onAppear { reloadIfNeeded() }

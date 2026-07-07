@@ -113,10 +113,20 @@ final class BackgroundAgent: ObservableObject {
 
     private var watchRoot = ""
     private var budgetBytes: UInt64 = 0
+    /// 증분 재집계용 상주 핸들 — 첫 재집계는 전체 스캔으로 만들고 이후 refresh_paths.
+    private var liveHandle: ScanHandle?
+    /// FSEvents가 알려준 변경 디렉토리 (다음 재집계까지 누적).
+    private var pendingPaths: Set<String> = []
+    private var mustFullRescan = false
+    /// 이보다 변경 경로가 많으면 증분 이득이 없다 — 전체 재스캔으로 강등.
+    private let incrementalPathLimit = 256
 
     private func startLiveWatch(root: String, budgetGiB: Double) {
         watchRoot = root
         budgetBytes = budgetGiB > 0 ? UInt64(budgetGiB * 1_073_741_824) : 0
+        liveHandle = nil
+        pendingPaths = []
+        mustFullRescan = false
 
         var context = FSEventStreamContext(
             version: 0,
@@ -124,16 +134,28 @@ final class BackgroundAgent: ObservableObject {
             retain: nil, release: nil, copyDescription: nil)
 
         // latency 10초 — 이벤트를 커널이 모아서 배치로 전달(wakeup 최소화).
+        // UseCFTypes: 콜백 eventPaths를 CFArray<String>으로 받아 변경 위치를 수집(F2 증분).
         let flags = UInt32(
-            kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot)
+            kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot
+                | kFSEventStreamCreateFlagUseCFTypes)
         guard
             let stream = FSEventStreamCreate(
                 kCFAllocatorDefault,
-                { _, info, _, _, _, _ in
+                { _, info, numEvents, eventPaths, eventFlags, _ in
                     guard let info else { return }
                     let agent = Unmanaged<BackgroundAgent>.fromOpaque(info)
                         .takeUnretainedValue()
-                    Task { @MainActor in agent.onFSEvents() }
+                    let paths =
+                        (Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue()
+                            as NSArray as? [String]) ?? []
+                    // 커널이 이벤트를 합쳤으면(큐 넘침 등) 하위 전체를 다시 봐야 한다.
+                    var coalesced = false
+                    for i in 0..<numEvents
+                    where eventFlags[i] & UInt32(kFSEventStreamEventFlagMustScanSubDirs) != 0 {
+                        coalesced = true
+                    }
+                    let mustFull = coalesced
+                    Task { @MainActor in agent.onFSEvents(paths: paths, mustFull: mustFull) }
                 },
                 &context,
                 [root] as CFArray,
@@ -163,11 +185,18 @@ final class BackgroundAgent: ObservableObject {
         debounceTask?.cancel()
         debounceTask = nil
         pendingSince = nil
+        liveHandle = nil
+        pendingPaths = []
+        mustFullRescan = false
     }
 
     /// 이벤트 수신 — 즉시 재집계하지 않고 debounce. IO 폭주 시 오히려 배치가 커져 효율적.
-    private func onFSEvents() {
+    /// 변경 경로를 누적해 두면 재집계가 서브트리 단위 증분으로 동작한다 (F2).
+    private func onFSEvents(paths: [String], mustFull: Bool) {
         if pendingSince == nil { pendingSince = Date() }
+        if mustFull { mustFullRescan = true }
+        pendingPaths.formUnion(paths)
+        if pendingPaths.count > incrementalPathLimit { mustFullRescan = true }
         scheduleRecompute(delay: 8)
     }
 
@@ -194,19 +223,40 @@ final class BackgroundAgent: ObservableObject {
         isRecomputing = true
         pendingSince = nil
         let root = watchRoot
-        let handle = try? await Task.detached(priority: .background) {
-            // 스냅샷도 저장해 '변화' 탭에 축적.
-            try scanAndSave(path: root, minFileMib: 50, dbPath: AppModel.dbPath)
-        }.value
+        let changed = Array(pendingPaths)
+        let incremental = liveHandle != nil && !mustFullRescan && !changed.isEmpty
+        pendingPaths = []
+        mustFullRescan = false
+
+        let handle: ScanHandle?
+        var mode = "전체"
+        if incremental, let live = liveHandle {
+            // 변경된 서브트리만 재스캔하고 갱신된 트리를 스냅샷으로 저장 (F2).
+            let ok = await Task.detached(priority: .background) { () -> Bool in
+                guard (try? live.refreshPaths(absPaths: changed, minFileMib: 50)) != nil
+                else { return false }
+                return (try? live.saveToDb(dbPath: AppModel.dbPath)) != nil
+            }.value
+            handle = ok ? live : nil
+            mode = "증분 \(changed.count)곳"
+        } else {
+            handle = try? await Task.detached(priority: .background) {
+                // 스냅샷도 저장해 '변화' 탭에 축적.
+                try scanAndSave(path: root, minFileMib: 50, dbPath: AppModel.dbPath)
+            }.value
+        }
         isRecomputing = false
         guard let handle else {
+            // 증분 실패(루트 소실 등)면 다음 재집계는 전체 스캔으로.
+            liveHandle = nil
             status = "재집계 실패"
             return
         }
+        liveHandle = handle
         let total = (try? handle.nodeAt(indexPath: []).allocatedSize) ?? 0
         lastTotal = total
         lastUpdated = Date()
-        status = "최근 집계 \(humanBytes(total)) · \(shortNow())"
+        status = "최근 집계 \(humanBytes(total)) (\(mode)) · \(shortNow())"
 
         if budgetBytes > 0 && total > budgetBytes {
             notifyBudget(total: total, budget: budgetBytes, root: root)

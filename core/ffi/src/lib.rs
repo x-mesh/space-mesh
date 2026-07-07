@@ -3,10 +3,10 @@
 //! 트리는 재귀 Record로 넘기지 않고(ScanHandle이 소유), Swift는 index path(Vec<u32>)로
 //! 레벨 단위 조회한다 — 수십만 노드를 FFI 경계 너머로 복사하지 않기 위한 설계.
 
-use space_scanner::{scan_with_progress, DirNode, ScanOptions};
+use space_scanner::{rescan_subtree, scan_with_progress, DirNode, ScanOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 uniffi::setup_scaffolding!();
 
@@ -54,31 +54,33 @@ pub struct BigFile {
     pub allocated_size: u64,
 }
 
-#[derive(uniffi::Record)]
+#[derive(uniffi::Record, Clone)]
 pub struct ScanStatsInfo {
     pub total_files: u64,
     pub total_dirs: u64,
     pub errors: u64,
+    /// errors 중 권한 거부(EACCES/EPERM) — Full Disk Access 안내 판단용.
+    pub permission_errors: u64,
 }
 
+/// 스캔 트리 핸들. refresh_paths(F2)로 서브트리 단위 갱신이 가능해
+/// 내부 상태를 RwLock으로 보호한다 — 조회는 동시, 갱신은 배타.
 #[derive(uniffi::Object)]
 pub struct ScanHandle {
     root_path: PathBuf,
-    root: DirNode,
-    stats: ScanStatsInfo,
+    root: RwLock<DirNode>,
+    stats: RwLock<ScanStatsInfo>,
 }
 
-impl ScanHandle {
-    fn resolve(&self, index_path: &[u32]) -> Result<&DirNode, ScanError> {
-        let mut node = &self.root;
-        for &i in index_path {
-            node = node
-                .children
-                .get(i as usize)
-                .ok_or(ScanError::InvalidPath)?;
-        }
-        Ok(node)
+fn resolve<'a>(root: &'a DirNode, index_path: &[u32]) -> Result<&'a DirNode, ScanError> {
+    let mut node = root;
+    for &i in index_path {
+        node = node
+            .children
+            .get(i as usize)
+            .ok_or(ScanError::InvalidPath)?;
     }
+    Ok(node)
 }
 
 fn to_info(index: u32, node: &DirNode) -> NodeInfo {
@@ -97,13 +99,15 @@ fn to_info(index: u32, node: &DirNode) -> NodeInfo {
 impl ScanHandle {
     /// index path가 가리키는 노드의 정보.
     pub fn node_at(&self, index_path: Vec<u32>) -> Result<NodeInfo, ScanError> {
+        let root = self.root.read().unwrap();
         let idx = index_path.last().copied().unwrap_or(0);
-        Ok(to_info(idx, self.resolve(&index_path)?))
+        Ok(to_info(idx, resolve(&root, &index_path)?))
     }
 
     /// 해당 노드의 자식 디렉토리 목록 (allocated 내림차순, 원본 index 포함).
     pub fn children(&self, index_path: Vec<u32>) -> Result<Vec<NodeInfo>, ScanError> {
-        let node = self.resolve(&index_path)?;
+        let root = self.root.read().unwrap();
+        let node = resolve(&root, &index_path)?;
         let mut infos: Vec<NodeInfo> = node
             .children
             .iter()
@@ -116,7 +120,8 @@ impl ScanHandle {
 
     /// 해당 노드 직속의 대용량 파일 (allocated 내림차순).
     pub fn big_files_at(&self, index_path: Vec<u32>) -> Result<Vec<BigFile>, ScanError> {
-        let node = self.resolve(&index_path)?;
+        let root = self.root.read().unwrap();
+        let node = resolve(&root, &index_path)?;
         let mut files: Vec<BigFile> = node
             .big_files
             .iter()
@@ -132,7 +137,8 @@ impl ScanHandle {
 
     /// 트리 전체에서 가장 큰 파일 top-N.
     pub fn top_files(&self, limit: u32) -> Vec<BigFile> {
-        space_scanner::top_files(&self.root, limit as usize)
+        let root = self.root.read().unwrap();
+        space_scanner::top_files(&root, limit as usize)
             .into_iter()
             .map(|f| BigFile {
                 path: f.path.to_string_lossy().into_owned(),
@@ -144,8 +150,9 @@ impl ScanHandle {
 
     /// index path를 실제 파일시스템 경로 문자열로 변환 (Finder 표시/Quick Look용).
     pub fn full_path(&self, index_path: Vec<u32>) -> Result<String, ScanError> {
+        let root = self.root.read().unwrap();
         let mut path = self.root_path.clone();
-        let mut node = &self.root;
+        let mut node = &*root;
         for &i in &index_path {
             node = node
                 .children
@@ -157,11 +164,112 @@ impl ScanHandle {
     }
 
     pub fn stats(&self) -> ScanStatsInfo {
-        ScanStatsInfo {
-            total_files: self.stats.total_files,
-            total_dirs: self.stats.total_dirs,
-            errors: self.stats.errors,
+        self.stats.read().unwrap().clone()
+    }
+}
+
+// ───────────────────────── F2: 증분 재스캔 ─────────────────────────
+
+/// refresh_paths 한 번의 요약 — UI 상태 표시와 검증 리포트(F1)에 쓴다.
+#[derive(uniffi::Record)]
+pub struct RefreshSummary {
+    /// 실제로 재스캔한 서브트리 수 (정규화 후).
+    pub refreshed_subtrees: u32,
+    /// 트리 전체 allocated 변화량 (음수 = 감소).
+    pub delta_allocated: i64,
+    /// 재스캔 중 건너뛴 항목 수 (권한 등).
+    pub errors: u64,
+    pub elapsed_ms: u64,
+}
+
+#[uniffi::export]
+impl ScanHandle {
+    /// 절대 경로 목록이 가리키는 서브트리만 다시 스캔해 트리를 갱신한다.
+    /// 루트 밖 경로는 무시하고, 포함 관계인 경로는 최상위만 재스캔한다.
+    /// 블로킹(서브트리 크기에 비례) — Swift는 백그라운드에서 직렬로 호출할 것.
+    pub fn refresh_paths(
+        &self,
+        abs_paths: Vec<String>,
+        min_file_mib: u64,
+    ) -> Result<RefreshSummary, ScanError> {
+        let started = std::time::Instant::now();
+        let opts = ScanOptions {
+            record_file_threshold: min_file_mib * 1024 * 1024,
+            ..Default::default()
+        };
+
+        // 루트 기준 상대 경로로 정규화. 루트 자신/루트 밖은 규칙대로 처리.
+        let mut rels: Vec<PathBuf> = Vec::new();
+        for p in &abs_paths {
+            let p = Path::new(p);
+            match p.strip_prefix(&self.root_path) {
+                Ok(rel) => rels.push(rel.to_path_buf()),
+                Err(_) => continue, // 루트 밖 — 무시
+            }
         }
+        // 포함 관계 정규화: 정렬 후, 직전에 남긴 경로의 하위면 건너뛴다.
+        rels.sort();
+        let mut targets: Vec<PathBuf> = Vec::new();
+        for rel in rels {
+            if let Some(last) = targets.last() {
+                if last.as_os_str().is_empty() || rel.starts_with(last) {
+                    continue;
+                }
+            }
+            targets.push(rel);
+        }
+
+        let mut root = self.root.write().unwrap();
+        let mut delta_allocated = 0i64;
+        let mut delta_files = 0i64;
+        let mut delta_dirs = 0i64;
+        let mut errors = 0u64;
+        let mut refreshed = 0u32;
+        for rel in &targets {
+            match rescan_subtree(&mut root, &self.root_path, rel, &opts) {
+                Ok(d) => {
+                    delta_allocated += d.allocated;
+                    delta_files += d.files;
+                    delta_dirs += d.dirs;
+                    errors += d.errors;
+                    refreshed += 1;
+                }
+                // 루트 자체가 사라진 경우만 에러로 승격, 나머지는 다음 항목 진행.
+                Err(e) if rel.as_os_str().is_empty() => {
+                    return Err(ScanError::Io { msg: e.to_string() })
+                }
+                Err(_) => errors += 1,
+            }
+        }
+        drop(root);
+
+        let mut stats = self.stats.write().unwrap();
+        stats.total_files = stats.total_files.saturating_add_signed(delta_files);
+        stats.total_dirs = stats.total_dirs.saturating_add_signed(delta_dirs);
+
+        Ok(RefreshSummary {
+            refreshed_subtrees: refreshed,
+            delta_allocated,
+            errors,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// 현재 트리(증분 갱신 포함)를 스냅샷으로 저장하고 scan_id를 반환한다.
+    /// live 모드가 refresh_paths 후 시계열을 계속 쌓는 데 쓴다.
+    pub fn save_to_db(&self, db_path: String) -> Result<i64, ScanError> {
+        let mut conn = space_index::open(Path::new(&db_path))
+            .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+        let root = self.root.read().unwrap();
+        let stats = self.stats.read().unwrap().clone();
+        space_index::save_tree(
+            &mut conn,
+            &self.root_path,
+            &root,
+            stats.total_files,
+            stats.total_dirs,
+        )
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })
     }
 }
 
@@ -177,26 +285,23 @@ pub fn scan_path(path: String, min_file_mib: u64) -> Result<Arc<ScanHandle>, Sca
         .map_err(|e| ScanError::Io { msg: e.to_string() })?;
     Ok(Arc::new(ScanHandle {
         root_path,
-        stats: ScanStatsInfo {
+        stats: RwLock::new(ScanStatsInfo {
             total_files: result.stats.total_files,
             total_dirs: result.stats.total_dirs,
             errors: result.stats.errors,
-        },
-        root: result.root,
+            permission_errors: result.stats.permission_errors,
+        }),
+        root: RwLock::new(result.root),
     }))
 }
 
 /// SQLite 스냅샷에서 로드. 없으면 Snapshot 에러.
 #[uniffi::export]
 pub fn load_snapshot(db_path: String, root_path: String) -> Result<Arc<ScanHandle>, ScanError> {
-    let conn = space_index::open(Path::new(&db_path)).map_err(|e| ScanError::Snapshot {
-        msg: e.to_string(),
-    })?;
-    let loaded = space_index::load_latest(&conn, Path::new(&root_path)).map_err(|e| {
-        ScanError::Snapshot {
-            msg: e.to_string(),
-        }
-    })?;
+    let conn = space_index::open(Path::new(&db_path))
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    let loaded = space_index::load_latest(&conn, Path::new(&root_path))
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
     let Some((meta, root)) = loaded else {
         return Err(ScanError::Snapshot {
             msg: "no snapshot for this root".into(),
@@ -204,12 +309,13 @@ pub fn load_snapshot(db_path: String, root_path: String) -> Result<Arc<ScanHandl
     };
     Ok(Arc::new(ScanHandle {
         root_path: PathBuf::from(root_path),
-        stats: ScanStatsInfo {
+        stats: RwLock::new(ScanStatsInfo {
             total_files: meta.total_files,
             total_dirs: meta.total_dirs,
             errors: 0,
-        },
-        root,
+            permission_errors: 0,
+        }),
+        root: RwLock::new(root),
     }))
 }
 
@@ -227,22 +333,19 @@ pub fn scan_and_save(
     };
     let result = scan_with_progress(&root_path, opts, Some(reset_progress()))
         .map_err(|e| ScanError::Io { msg: e.to_string() })?;
-    let mut conn = space_index::open(Path::new(&db_path)).map_err(|e| ScanError::Snapshot {
-        msg: e.to_string(),
-    })?;
-    space_index::save_snapshot(&mut conn, &root_path, &result).map_err(|e| {
-        ScanError::Snapshot {
-            msg: e.to_string(),
-        }
-    })?;
+    let mut conn = space_index::open(Path::new(&db_path))
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    space_index::save_snapshot(&mut conn, &root_path, &result)
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
     Ok(Arc::new(ScanHandle {
         root_path,
-        stats: ScanStatsInfo {
+        stats: RwLock::new(ScanStatsInfo {
             total_files: result.stats.total_files,
             total_dirs: result.stats.total_dirs,
             errors: result.stats.errors,
-        },
-        root: result.root,
+            permission_errors: result.stats.permission_errors,
+        }),
+        root: RwLock::new(result.root),
     }))
 }
 
@@ -341,7 +444,8 @@ impl ScanHandle {
     /// 스캔된 트리에서 잘 알려진 산출물 카테고리(node_modules, cargo target 등)를 찾는다.
     /// 트리는 메모리에 있어 즉시 반환된다 (마커 확인만 파일시스템 조회).
     pub fn categories(&self) -> Vec<CategoryHitInfo> {
-        let hits = space_rules::categories::find_categories(&self.root, &self.root_path);
+        let root = self.root.read().unwrap();
+        let hits = space_rules::categories::find_categories(&root, &self.root_path);
         let idle = space_rules::categories::annotate_idle(&hits);
         hits.into_iter()
             .map(|h| CategoryHitInfo {
@@ -497,16 +601,20 @@ fn resolve_by_names<'a>(root: Option<&'a DirNode>, path: &[String]) -> Option<&'
 impl DiffHandle {
     /// 잔차 귀속 범인 목록 (기존 flat 뷰와 동일).
     pub fn culprits(&self, min_delta_mib: u64) -> Vec<DiffEntryInfo> {
-        space_index::diff_trees(self.old.as_ref(), self.new.as_ref(), min_delta_mib * 1024 * 1024)
-            .into_iter()
-            .map(|e| DiffEntryInfo {
-                path: e.path,
-                delta: e.delta,
-                before_total: e.before_total,
-                after_total: e.after_total,
-                is_residual: e.is_residual,
-            })
-            .collect()
+        space_index::diff_trees(
+            self.old.as_ref(),
+            self.new.as_ref(),
+            min_delta_mib * 1024 * 1024,
+        )
+        .into_iter()
+        .map(|e| DiffEntryInfo {
+            path: e.path,
+            delta: e.delta,
+            before_total: e.before_total,
+            after_total: e.after_total,
+            is_residual: e.is_residual,
+        })
+        .collect()
     }
 
     /// path(루트 아래 이름 세그먼트) 디렉토리의 자식별 변화 + 직속 파일 잔차 행.
@@ -528,8 +636,11 @@ impl DiffHandle {
                 new_children.insert(c.name.as_str(), c);
             }
         }
-        let mut names: Vec<&str> =
-            old_children.keys().chain(new_children.keys()).copied().collect();
+        let mut names: Vec<&str> = old_children
+            .keys()
+            .chain(new_children.keys())
+            .copied()
+            .collect();
         names.sort_unstable();
         names.dedup();
 
@@ -632,6 +743,73 @@ impl DiffHandle {
     }
 }
 
+// ───────────────────────── F1: 회수 실행 이력 ─────────────────────────
+
+#[derive(uniffi::Record)]
+pub struct ReclaimRecordInfo {
+    pub id: i64,
+    pub executed_at: String,
+    pub item_count: u64,
+    pub estimated: u64,
+    /// 실행 후 증분 재스캔으로 측정한 실제 회수량 (양수 = 줄어든 양). None = 미측정.
+    pub measured: Option<i64>,
+    pub undone: bool,
+}
+
+fn open_db(db_path: &str) -> Result<space_index::rusqlite::Connection, ScanError> {
+    space_index::open(Path::new(db_path)).map_err(|e| ScanError::Snapshot { msg: e.to_string() })
+}
+
+/// 회수 실행 기록 생성 — 실행 직전에 호출하고, 검증 후 set_measured로 채운다.
+#[uniffi::export]
+pub fn reclaim_log_add(
+    db_path: String,
+    root_path: String,
+    item_count: u64,
+    estimated: u64,
+) -> Result<i64, ScanError> {
+    let conn = open_db(&db_path)?;
+    space_index::reclaim_log_add(&conn, Path::new(&root_path), item_count, estimated)
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })
+}
+
+#[uniffi::export]
+pub fn reclaim_log_set_measured(db_path: String, id: i64, measured: i64) -> Result<(), ScanError> {
+    let conn = open_db(&db_path)?;
+    space_index::reclaim_log_set_measured(&conn, id, measured)
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })
+}
+
+#[uniffi::export]
+pub fn reclaim_log_set_undone(db_path: String, id: i64) -> Result<(), ScanError> {
+    let conn = open_db(&db_path)?;
+    space_index::reclaim_log_set_undone(&conn, id)
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })
+}
+
+/// 해당 루트의 회수 이력 (최신순).
+#[uniffi::export]
+pub fn reclaim_log_list(
+    db_path: String,
+    root_path: String,
+    limit: u32,
+) -> Result<Vec<ReclaimRecordInfo>, ScanError> {
+    let conn = open_db(&db_path)?;
+    let records = space_index::reclaim_log_list(&conn, Path::new(&root_path), limit)
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    Ok(records
+        .into_iter()
+        .map(|r| ReclaimRecordInfo {
+            id: r.id,
+            executed_at: r.executed_at,
+            item_count: r.item_count,
+            estimated: r.estimated,
+            measured: r.measured,
+            undone: r.undone,
+        })
+        .collect())
+}
+
 // ───────────────────────── git repo 건강도 (t2) ─────────────────────────
 
 #[derive(uniffi::Record)]
@@ -671,11 +849,7 @@ pub struct GitReport {
 /// 스캔 트리에서 .git을 가진 노드의 (경로, tree_sig)를 수집한다.
 /// tree_sig = repo 서브트리의 file_count·allocated_size 조합 — working-tree 변경
 /// (파일 추가/삭제/크기변화)을 캐시 무효화 보조 키로 쓴다.
-fn collect_git_candidates(
-    node: &DirNode,
-    path: &std::path::Path,
-    out: &mut Vec<(PathBuf, u64)>,
-) {
+fn collect_git_candidates(node: &DirNode, path: &std::path::Path, out: &mut Vec<(PathBuf, u64)>) {
     let has_dot_git = node.children.iter().any(|c| c.name == ".git");
     if has_dot_git {
         let tree_sig = node
@@ -796,12 +970,14 @@ impl ScanHandle {
 impl ScanHandle {
     fn git_repos_impl(&self, include_submodules: bool, db_path: Option<String>) -> GitReport {
         let mut candidates = Vec::new();
-        collect_git_candidates(&self.root, &self.root_path, &mut candidates);
+        {
+            let root = self.root.read().unwrap();
+            collect_git_candidates(&root, &self.root_path, &mut candidates);
+        }
         // (path, tree_sig) → filter_repos는 경로만 받으므로 매핑 유지.
         let paths: Vec<PathBuf> = candidates.iter().map(|(p, _)| p.clone()).collect();
         let repos = space_git::filter_repos(&paths, include_submodules);
-        let tree_sig_of: std::collections::HashMap<PathBuf, u64> =
-            candidates.into_iter().collect();
+        let tree_sig_of: std::collections::HashMap<PathBuf, u64> = candidates.into_iter().collect();
 
         const TTL: u64 = 24 * 3600;
         let now = std::time::SystemTime::now()
@@ -841,19 +1017,15 @@ impl ScanHandle {
                 let tsig = tree_sig_of.get(&h.path).copied().unwrap_or(0);
                 let gsig = space_git::git_signature(&h.path);
                 let info = health_to_info(h);
-                let _ = space_index::git_cache_put(
-                    c,
-                    &key,
-                    gsig,
-                    tsig,
-                    &repo_info_to_json(&info),
-                    now,
-                );
+                let _ =
+                    space_index::git_cache_put(c, &key, gsig, tsig, &repo_info_to_json(&info), now);
             }
         }
 
-        let mut repos: Vec<GitRepoInfo> =
-            cached.into_iter().chain(healthy.iter().map(health_to_info)).collect();
+        let mut repos: Vec<GitRepoInfo> = cached
+            .into_iter()
+            .chain(healthy.iter().map(health_to_info))
+            .collect();
         // 위험도순 재정렬 (캐시+신규 혼합).
         repos.sort_by_key(|r| match r.risk.as_str() {
             "danger" => 0u8,

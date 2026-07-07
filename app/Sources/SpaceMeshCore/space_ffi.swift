@@ -682,6 +682,10 @@ public func FfiConverterTypeDiffHandle_lower(_ value: DiffHandle) -> UnsafeMutab
 
 
 
+/**
+ * 스캔 트리 핸들. refresh_paths(F2)로 서브트리 단위 갱신이 가능해
+ * 내부 상태를 RwLock으로 보호한다 — 조회는 동시, 갱신은 배타.
+ */
 public protocol ScanHandleProtocol: AnyObject, Sendable {
     
     /**
@@ -723,6 +727,19 @@ public protocol ScanHandleProtocol: AnyObject, Sendable {
      */
     func nodeAt(indexPath: [UInt32]) throws  -> NodeInfo
     
+    /**
+     * 절대 경로 목록이 가리키는 서브트리만 다시 스캔해 트리를 갱신한다.
+     * 루트 밖 경로는 무시하고, 포함 관계인 경로는 최상위만 재스캔한다.
+     * 블로킹(서브트리 크기에 비례) — Swift는 백그라운드에서 직렬로 호출할 것.
+     */
+    func refreshPaths(absPaths: [String], minFileMib: UInt64) throws  -> RefreshSummary
+    
+    /**
+     * 현재 트리(증분 갱신 포함)를 스냅샷으로 저장하고 scan_id를 반환한다.
+     * live 모드가 refresh_paths 후 시계열을 계속 쌓는 데 쓴다.
+     */
+    func saveToDb(dbPath: String) throws  -> Int64
+    
     func stats()  -> ScanStatsInfo
     
     /**
@@ -731,6 +748,10 @@ public protocol ScanHandleProtocol: AnyObject, Sendable {
     func topFiles(limit: UInt32)  -> [BigFile]
     
 }
+/**
+ * 스캔 트리 핸들. refresh_paths(F2)로 서브트리 단위 갱신이 가능해
+ * 내부 상태를 RwLock으로 보호한다 — 조회는 동시, 갱신은 배타.
+ */
 open class ScanHandle: ScanHandleProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
@@ -860,6 +881,32 @@ open func nodeAt(indexPath: [UInt32])throws  -> NodeInfo  {
     return try  FfiConverterTypeNodeInfo_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
     uniffi_space_ffi_fn_method_scanhandle_node_at(self.uniffiClonePointer(),
         FfiConverterSequenceUInt32.lower(indexPath),$0
+    )
+})
+}
+    
+    /**
+     * 절대 경로 목록이 가리키는 서브트리만 다시 스캔해 트리를 갱신한다.
+     * 루트 밖 경로는 무시하고, 포함 관계인 경로는 최상위만 재스캔한다.
+     * 블로킹(서브트리 크기에 비례) — Swift는 백그라운드에서 직렬로 호출할 것.
+     */
+open func refreshPaths(absPaths: [String], minFileMib: UInt64)throws  -> RefreshSummary  {
+    return try  FfiConverterTypeRefreshSummary_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_method_scanhandle_refresh_paths(self.uniffiClonePointer(),
+        FfiConverterSequenceString.lower(absPaths),
+        FfiConverterUInt64.lower(minFileMib),$0
+    )
+})
+}
+    
+    /**
+     * 현재 트리(증분 갱신 포함)를 스냅샷으로 저장하고 scan_id를 반환한다.
+     * live 모드가 refresh_paths 후 시계열을 계속 쌓는 데 쓴다.
+     */
+open func saveToDb(dbPath: String)throws  -> Int64  {
+    return try  FfiConverterInt64.lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_method_scanhandle_save_to_db(self.uniffiClonePointer(),
+        FfiConverterString.lower(dbPath),$0
     )
 })
 }
@@ -2059,17 +2106,240 @@ public func FfiConverterTypeNodeInfo_lower(_ value: NodeInfo) -> RustBuffer {
 }
 
 
+public struct ReclaimRecordInfo {
+    public var id: Int64
+    public var executedAt: String
+    public var itemCount: UInt64
+    public var estimated: UInt64
+    /**
+     * 실행 후 증분 재스캔으로 측정한 실제 회수량 (양수 = 줄어든 양). None = 미측정.
+     */
+    public var measured: Int64?
+    public var undone: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: Int64, executedAt: String, itemCount: UInt64, estimated: UInt64, 
+        /**
+         * 실행 후 증분 재스캔으로 측정한 실제 회수량 (양수 = 줄어든 양). None = 미측정.
+         */measured: Int64?, undone: Bool) {
+        self.id = id
+        self.executedAt = executedAt
+        self.itemCount = itemCount
+        self.estimated = estimated
+        self.measured = measured
+        self.undone = undone
+    }
+}
+
+#if compiler(>=6)
+extension ReclaimRecordInfo: Sendable {}
+#endif
+
+
+extension ReclaimRecordInfo: Equatable, Hashable {
+    public static func ==(lhs: ReclaimRecordInfo, rhs: ReclaimRecordInfo) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.executedAt != rhs.executedAt {
+            return false
+        }
+        if lhs.itemCount != rhs.itemCount {
+            return false
+        }
+        if lhs.estimated != rhs.estimated {
+            return false
+        }
+        if lhs.measured != rhs.measured {
+            return false
+        }
+        if lhs.undone != rhs.undone {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(executedAt)
+        hasher.combine(itemCount)
+        hasher.combine(estimated)
+        hasher.combine(measured)
+        hasher.combine(undone)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReclaimRecordInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReclaimRecordInfo {
+        return
+            try ReclaimRecordInfo(
+                id: FfiConverterInt64.read(from: &buf), 
+                executedAt: FfiConverterString.read(from: &buf), 
+                itemCount: FfiConverterUInt64.read(from: &buf), 
+                estimated: FfiConverterUInt64.read(from: &buf), 
+                measured: FfiConverterOptionInt64.read(from: &buf), 
+                undone: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ReclaimRecordInfo, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.id, into: &buf)
+        FfiConverterString.write(value.executedAt, into: &buf)
+        FfiConverterUInt64.write(value.itemCount, into: &buf)
+        FfiConverterUInt64.write(value.estimated, into: &buf)
+        FfiConverterOptionInt64.write(value.measured, into: &buf)
+        FfiConverterBool.write(value.undone, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReclaimRecordInfo_lift(_ buf: RustBuffer) throws -> ReclaimRecordInfo {
+    return try FfiConverterTypeReclaimRecordInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReclaimRecordInfo_lower(_ value: ReclaimRecordInfo) -> RustBuffer {
+    return FfiConverterTypeReclaimRecordInfo.lower(value)
+}
+
+
+/**
+ * refresh_paths 한 번의 요약 — UI 상태 표시와 검증 리포트(F1)에 쓴다.
+ */
+public struct RefreshSummary {
+    /**
+     * 실제로 재스캔한 서브트리 수 (정규화 후).
+     */
+    public var refreshedSubtrees: UInt32
+    /**
+     * 트리 전체 allocated 변화량 (음수 = 감소).
+     */
+    public var deltaAllocated: Int64
+    /**
+     * 재스캔 중 건너뛴 항목 수 (권한 등).
+     */
+    public var errors: UInt64
+    public var elapsedMs: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 실제로 재스캔한 서브트리 수 (정규화 후).
+         */refreshedSubtrees: UInt32, 
+        /**
+         * 트리 전체 allocated 변화량 (음수 = 감소).
+         */deltaAllocated: Int64, 
+        /**
+         * 재스캔 중 건너뛴 항목 수 (권한 등).
+         */errors: UInt64, elapsedMs: UInt64) {
+        self.refreshedSubtrees = refreshedSubtrees
+        self.deltaAllocated = deltaAllocated
+        self.errors = errors
+        self.elapsedMs = elapsedMs
+    }
+}
+
+#if compiler(>=6)
+extension RefreshSummary: Sendable {}
+#endif
+
+
+extension RefreshSummary: Equatable, Hashable {
+    public static func ==(lhs: RefreshSummary, rhs: RefreshSummary) -> Bool {
+        if lhs.refreshedSubtrees != rhs.refreshedSubtrees {
+            return false
+        }
+        if lhs.deltaAllocated != rhs.deltaAllocated {
+            return false
+        }
+        if lhs.errors != rhs.errors {
+            return false
+        }
+        if lhs.elapsedMs != rhs.elapsedMs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(refreshedSubtrees)
+        hasher.combine(deltaAllocated)
+        hasher.combine(errors)
+        hasher.combine(elapsedMs)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeRefreshSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> RefreshSummary {
+        return
+            try RefreshSummary(
+                refreshedSubtrees: FfiConverterUInt32.read(from: &buf), 
+                deltaAllocated: FfiConverterInt64.read(from: &buf), 
+                errors: FfiConverterUInt64.read(from: &buf), 
+                elapsedMs: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: RefreshSummary, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.refreshedSubtrees, into: &buf)
+        FfiConverterInt64.write(value.deltaAllocated, into: &buf)
+        FfiConverterUInt64.write(value.errors, into: &buf)
+        FfiConverterUInt64.write(value.elapsedMs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRefreshSummary_lift(_ buf: RustBuffer) throws -> RefreshSummary {
+    return try FfiConverterTypeRefreshSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeRefreshSummary_lower(_ value: RefreshSummary) -> RustBuffer {
+    return FfiConverterTypeRefreshSummary.lower(value)
+}
+
+
 public struct ScanStatsInfo {
     public var totalFiles: UInt64
     public var totalDirs: UInt64
     public var errors: UInt64
+    /**
+     * errors 중 권한 거부(EACCES/EPERM) — Full Disk Access 안내 판단용.
+     */
+    public var permissionErrors: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(totalFiles: UInt64, totalDirs: UInt64, errors: UInt64) {
+    public init(totalFiles: UInt64, totalDirs: UInt64, errors: UInt64, 
+        /**
+         * errors 중 권한 거부(EACCES/EPERM) — Full Disk Access 안내 판단용.
+         */permissionErrors: UInt64) {
         self.totalFiles = totalFiles
         self.totalDirs = totalDirs
         self.errors = errors
+        self.permissionErrors = permissionErrors
     }
 }
 
@@ -2089,6 +2359,9 @@ extension ScanStatsInfo: Equatable, Hashable {
         if lhs.errors != rhs.errors {
             return false
         }
+        if lhs.permissionErrors != rhs.permissionErrors {
+            return false
+        }
         return true
     }
 
@@ -2096,6 +2369,7 @@ extension ScanStatsInfo: Equatable, Hashable {
         hasher.combine(totalFiles)
         hasher.combine(totalDirs)
         hasher.combine(errors)
+        hasher.combine(permissionErrors)
     }
 }
 
@@ -2110,7 +2384,8 @@ public struct FfiConverterTypeScanStatsInfo: FfiConverterRustBuffer {
             try ScanStatsInfo(
                 totalFiles: FfiConverterUInt64.read(from: &buf), 
                 totalDirs: FfiConverterUInt64.read(from: &buf), 
-                errors: FfiConverterUInt64.read(from: &buf)
+                errors: FfiConverterUInt64.read(from: &buf), 
+                permissionErrors: FfiConverterUInt64.read(from: &buf)
         )
     }
 
@@ -2118,6 +2393,7 @@ public struct FfiConverterTypeScanStatsInfo: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.totalFiles, into: &buf)
         FfiConverterUInt64.write(value.totalDirs, into: &buf)
         FfiConverterUInt64.write(value.errors, into: &buf)
+        FfiConverterUInt64.write(value.permissionErrors, into: &buf)
     }
 }
 
@@ -2443,6 +2719,30 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
+    typealias SwiftType = Int64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
     typealias SwiftType = [UInt32]
 
@@ -2743,6 +3043,31 @@ fileprivate struct FfiConverterSequenceTypeNodeInfo: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeReclaimRecordInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [ReclaimRecordInfo]
+
+    public static func write(_ value: [ReclaimRecordInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeReclaimRecordInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ReclaimRecordInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ReclaimRecordInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeReclaimRecordInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSnapshotInfo: FfiConverterRustBuffer {
     typealias SwiftType = [SnapshotInfo]
 
@@ -2867,6 +3192,46 @@ public func openDiff(dbPath: String, oldId: Int64, newId: Int64)throws  -> DiffH
 })
 }
 /**
+ * 회수 실행 기록 생성 — 실행 직전에 호출하고, 검증 후 set_measured로 채운다.
+ */
+public func reclaimLogAdd(dbPath: String, rootPath: String, itemCount: UInt64, estimated: UInt64)throws  -> Int64  {
+    return try  FfiConverterInt64.lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_func_reclaim_log_add(
+        FfiConverterString.lower(dbPath),
+        FfiConverterString.lower(rootPath),
+        FfiConverterUInt64.lower(itemCount),
+        FfiConverterUInt64.lower(estimated),$0
+    )
+})
+}
+/**
+ * 해당 루트의 회수 이력 (최신순).
+ */
+public func reclaimLogList(dbPath: String, rootPath: String, limit: UInt32)throws  -> [ReclaimRecordInfo]  {
+    return try  FfiConverterSequenceTypeReclaimRecordInfo.lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_func_reclaim_log_list(
+        FfiConverterString.lower(dbPath),
+        FfiConverterString.lower(rootPath),
+        FfiConverterUInt32.lower(limit),$0
+    )
+})
+}
+public func reclaimLogSetMeasured(dbPath: String, id: Int64, measured: Int64)throws   {try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_func_reclaim_log_set_measured(
+        FfiConverterString.lower(dbPath),
+        FfiConverterInt64.lower(id),
+        FfiConverterInt64.lower(measured),$0
+    )
+}
+}
+public func reclaimLogSetUndone(dbPath: String, id: Int64)throws   {try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_func_reclaim_log_set_undone(
+        FfiConverterString.lower(dbPath),
+        FfiConverterInt64.lower(id),$0
+    )
+}
+}
+/**
  * 스캔 후 스냅샷 저장까지 한 번에.
  */
 public func scanAndSave(path: String, minFileMib: UInt64, dbPath: String)throws  -> ScanHandle  {
@@ -2944,6 +3309,18 @@ private let initializationResult: InitializationResult = {
     if (uniffi_space_ffi_checksum_func_open_diff() != 51550) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_space_ffi_checksum_func_reclaim_log_add() != 17531) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_func_reclaim_log_list() != 42215) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_func_reclaim_log_set_measured() != 4152) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_func_reclaim_log_set_undone() != 2551) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_space_ffi_checksum_func_scan_and_save() != 45019) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2984,6 +3361,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_node_at() != 21162) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_method_scanhandle_refresh_paths() != 10205) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_method_scanhandle_save_to_db() != 44052) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_stats() != 61743) {

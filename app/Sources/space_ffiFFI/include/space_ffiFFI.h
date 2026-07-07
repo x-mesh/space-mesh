@@ -321,6 +321,16 @@ RustBuffer uniffi_space_ffi_fn_method_scanhandle_git_repos_cached(void*_Nonnull 
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_node_at(void*_Nonnull ptr, RustBuffer index_path, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_REFRESH_PATHS
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_REFRESH_PATHS
+RustBuffer uniffi_space_ffi_fn_method_scanhandle_refresh_paths(void*_Nonnull ptr, RustBuffer abs_paths, uint64_t min_file_mib, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_SAVE_TO_DB
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_SAVE_TO_DB
+int64_t uniffi_space_ffi_fn_method_scanhandle_save_to_db(void*_Nonnull ptr, RustBuffer db_path, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_STATS
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_STATS
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_stats(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
@@ -364,6 +374,26 @@ void*_Nonnull uniffi_space_ffi_fn_func_load_snapshot(RustBuffer db_path, RustBuf
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_OPEN_DIFF
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_OPEN_DIFF
 void*_Nonnull uniffi_space_ffi_fn_func_open_diff(RustBuffer db_path, int64_t old_id, int64_t new_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_ADD
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_ADD
+int64_t uniffi_space_ffi_fn_func_reclaim_log_add(RustBuffer db_path, RustBuffer root_path, uint64_t item_count, uint64_t estimated, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_LIST
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_LIST
+RustBuffer uniffi_space_ffi_fn_func_reclaim_log_list(RustBuffer db_path, RustBuffer root_path, uint32_t limit, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_SET_MEASURED
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_SET_MEASURED
+void uniffi_space_ffi_fn_func_reclaim_log_set_measured(RustBuffer db_path, int64_t id, int64_t measured, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_SET_UNDONE
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_SET_UNDONE
+void uniffi_space_ffi_fn_func_reclaim_log_set_undone(RustBuffer db_path, int64_t id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_SCAN_AND_SAVE
@@ -710,6 +740,30 @@ uint16_t uniffi_space_ffi_checksum_func_open_diff(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_ADD
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_ADD
+uint16_t uniffi_space_ffi_checksum_func_reclaim_log_add(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_LIST
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_LIST
+uint16_t uniffi_space_ffi_checksum_func_reclaim_log_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_SET_MEASURED
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_SET_MEASURED
+uint16_t uniffi_space_ffi_checksum_func_reclaim_log_set_measured(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_SET_UNDONE
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_SET_UNDONE
+uint16_t uniffi_space_ffi_checksum_func_reclaim_log_set_undone(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_SCAN_AND_SAVE
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_SCAN_AND_SAVE
 uint16_t uniffi_space_ffi_checksum_func_scan_and_save(void
@@ -791,6 +845,18 @@ uint16_t uniffi_space_ffi_checksum_method_scanhandle_git_repos_cached(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_NODE_AT
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_NODE_AT
 uint16_t uniffi_space_ffi_checksum_method_scanhandle_node_at(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_REFRESH_PATHS
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_REFRESH_PATHS
+uint16_t uniffi_space_ffi_checksum_method_scanhandle_refresh_paths(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_SAVE_TO_DB
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_SAVE_TO_DB
+uint16_t uniffi_space_ffi_checksum_method_scanhandle_save_to_db(void
     
 );
 #endif

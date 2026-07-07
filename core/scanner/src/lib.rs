@@ -54,8 +54,10 @@ pub struct FileEntry {
 /// 스캔 통계 (트리와 별도로 수집).
 #[derive(Debug, Default)]
 pub struct ScanStats {
-    /// 읽기 실패(권한 등)로 건너뛴 항목 수.
+    /// 읽기 실패로 건너뛴 항목 수 (permission_errors 포함).
     pub errors: u64,
+    /// errors 중 권한 거부(EACCES/EPERM)인 것 — Full Disk Access 안내 판단용.
+    pub permission_errors: u64,
     pub total_files: u64,
     pub total_dirs: u64,
 }
@@ -71,10 +73,20 @@ struct Ctx {
     /// nlink > 1 파일의 (dev, ino) — 최초 1회만 크기 집계.
     seen_hardlinks: DashSet<(u64, u64)>,
     errors: AtomicU64,
+    permission_errors: AtomicU64,
     total_files: AtomicU64,
     total_dirs: AtomicU64,
     /// 외부(UI)에서 폴링하는 라이브 진행 카운터 (스캔한 파일 수).
     progress: Option<Arc<AtomicU64>>,
+}
+
+impl Ctx {
+    fn record_error(&self, e: &std::io::Error) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            self.permission_errors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// 루트 경로를 병렬 스캔해 디렉토리 트리를 반환한다.
@@ -100,6 +112,7 @@ pub fn scan_with_progress(
         root_dev: root_md.dev(),
         seen_hardlinks: DashSet::new(),
         errors: AtomicU64::new(0),
+        permission_errors: AtomicU64::new(0),
         total_files: AtomicU64::new(0),
         total_dirs: AtomicU64::new(0),
         progress,
@@ -113,6 +126,7 @@ pub fn scan_with_progress(
         root: node,
         stats: ScanStats {
             errors: ctx.errors.load(Ordering::Relaxed),
+            permission_errors: ctx.permission_errors.load(Ordering::Relaxed),
             total_files: ctx.total_files.load(Ordering::Relaxed),
             total_dirs: ctx.total_dirs.load(Ordering::Relaxed),
         },
@@ -131,8 +145,8 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
 
     let entries = match fs::read_dir(path) {
         Ok(e) => e,
-        Err(_) => {
-            ctx.errors.fetch_add(1, Ordering::Relaxed);
+        Err(e) => {
+            ctx.record_error(&e);
             return DirNode {
                 name,
                 logical_size: logical,
@@ -148,16 +162,16 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
-            Err(_) => {
-                ctx.errors.fetch_add(1, Ordering::Relaxed);
+            Err(e) => {
+                ctx.record_error(&e);
                 continue;
             }
         };
         // DirEntry::metadata는 심볼릭 링크를 따라가지 않는다 (lstat 상당).
         let md = match entry.metadata() {
             Ok(m) => m,
-            Err(_) => {
-                ctx.errors.fetch_add(1, Ordering::Relaxed);
+            Err(e) => {
+                ctx.record_error(&e);
                 continue;
             }
         };
@@ -231,6 +245,131 @@ fn collect_files(node: &DirNode, out: &mut Vec<FileEntry>) {
     }
 }
 
+// ───────────────────────── 증분 재스캔 (F2) ─────────────────────────
+
+/// rescan_subtree 한 번이 트리 전체 집계에 만든 변화량.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SubtreeDelta {
+    pub logical: i64,
+    pub allocated: i64,
+    pub files: i64,
+    pub dirs: i64,
+    /// 재스캔 중 건너뛴 항목 수 (권한 등).
+    pub errors: u64,
+}
+
+impl SubtreeDelta {
+    fn between(old: &DirNode, new: &DirNode) -> Self {
+        Self {
+            logical: new.logical_size as i64 - old.logical_size as i64,
+            allocated: new.allocated_size as i64 - old.allocated_size as i64,
+            files: new.file_count as i64 - old.file_count as i64,
+            dirs: new.dir_count as i64 - old.dir_count as i64,
+            errors: 0,
+        }
+    }
+
+    fn removal(old: &DirNode) -> Self {
+        Self {
+            logical: -(old.logical_size as i64),
+            allocated: -(old.allocated_size as i64),
+            files: -(old.file_count as i64),
+            dirs: -(old.dir_count as i64),
+            errors: 0,
+        }
+    }
+}
+
+fn apply_delta(node: &mut DirNode, d: &SubtreeDelta) {
+    node.logical_size = node.logical_size.saturating_add_signed(d.logical);
+    node.allocated_size = node.allocated_size.saturating_add_signed(d.allocated);
+    node.file_count = node.file_count.saturating_add_signed(d.files);
+    node.dir_count = node.dir_count.saturating_add_signed(d.dirs);
+}
+
+/// root 트리에서 rel_path 서브트리만 다시 스캔해 교체하고, 조상 체인의
+/// 집계값(logical/allocated/file_count/dir_count)을 델타로 갱신한다.
+///
+/// - rel_path가 트리에 없으면(새 디렉토리 등) 트리에 존재하는 가장 깊은
+///   조상을 재스캔한다 — 그 과정에서 새 하위가 발견된다.
+/// - rel_path가 디스크에서 사라졌으면 해당 노드를 트리에서 제거한다.
+/// - 하드링크는 재스캔 서브트리 안에서만 1회로 접는다. 서브트리 밖과 걸친
+///   하드링크의 전역 정확도는 다음 전체 스캔에서 회복된다 (du와 같은 한계).
+/// - one_filesystem의 기준 device는 재스캔 대상의 device를 쓴다 (같은
+///   볼륨 안에서는 원래 스캔과 동일하게 동작).
+pub fn rescan_subtree(
+    root: &mut DirNode,
+    root_path: &Path,
+    rel_path: &Path,
+    opts: &ScanOptions,
+) -> std::io::Result<SubtreeDelta> {
+    let mut segments: Vec<String> = Vec::new();
+    for comp in rel_path.components() {
+        match comp {
+            std::path::Component::Normal(s) => segments.push(s.to_string_lossy().into_owned()),
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "rel_path must be relative without ..",
+                ));
+            }
+        }
+    }
+    rescan_at(root, root_path, &segments, opts)
+}
+
+fn rescan_at(
+    node: &mut DirNode,
+    disk_path: &Path,
+    segments: &[String],
+    opts: &ScanOptions,
+) -> std::io::Result<SubtreeDelta> {
+    if let Some((first, rest)) = segments.split_first() {
+        if let Some(pos) = node.children.iter().position(|c| &c.name == first) {
+            let child_disk = disk_path.join(first);
+            match fs::symlink_metadata(&child_disk) {
+                Ok(md) if md.is_dir() => {
+                    let delta = rescan_at(&mut node.children[pos], &child_disk, rest, opts)?;
+                    apply_delta(node, &delta);
+                    return Ok(delta);
+                }
+                // 디스크에서 사라졌거나 더 이상 디렉토리가 아님 → 트리에서 제거.
+                _ => {
+                    let old = node.children.remove(pos);
+                    let delta = SubtreeDelta::removal(&old);
+                    apply_delta(node, &delta);
+                    return Ok(delta);
+                }
+            }
+        }
+        // 트리에 없는 세그먼트 — 여기(존재하는 가장 깊은 조상)를 재스캔해 새 하위를 발견한다.
+    }
+
+    let md = fs::symlink_metadata(disk_path)?;
+    if !md.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "rescan target must be a directory",
+        ));
+    }
+    let ctx = Ctx {
+        opts: opts.clone(),
+        root_dev: md.dev(),
+        seen_hardlinks: DashSet::new(),
+        errors: AtomicU64::new(0),
+        permission_errors: AtomicU64::new(0),
+        total_files: AtomicU64::new(0),
+        total_dirs: AtomicU64::new(0),
+        progress: None,
+    };
+    let fresh = scan_dir(disk_path, node.name.clone(), &md, &ctx);
+    let mut delta = SubtreeDelta::between(node, &fresh);
+    delta.errors = ctx.errors.load(Ordering::Relaxed);
+    *node = fresh;
+    Ok(delta)
+}
+
 /// JSON 직렬화 전에 트리를 max_depth까지만 남기고 잘라낸다 (집계값은 유지).
 pub fn truncate_depth(node: &mut DirNode, max_depth: usize) {
     if max_depth == 0 {
@@ -284,6 +423,95 @@ mod tests {
         assert_eq!(result.stats.total_files, 1);
         assert_eq!(result.root.logical_size, 40_000);
 
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// 이름 기준 정렬 후 재귀 비교 — 병렬 스캔의 children 순서 차이를 무시한다.
+    fn assert_tree_eq(a: &DirNode, b: &DirNode) {
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.logical_size, b.logical_size, "logical of {}", a.name);
+        assert_eq!(
+            a.allocated_size, b.allocated_size,
+            "allocated of {}",
+            a.name
+        );
+        assert_eq!(a.file_count, b.file_count, "files of {}", a.name);
+        assert_eq!(a.dir_count, b.dir_count, "dirs of {}", a.name);
+        let sorted = |n: &DirNode| {
+            let mut v: Vec<usize> = (0..n.children.len()).collect();
+            v.sort_by(|&x, &y| n.children[x].name.cmp(&n.children[y].name));
+            v
+        };
+        assert_eq!(a.children.len(), b.children.len(), "children of {}", a.name);
+        for (&x, &y) in sorted(a).iter().zip(sorted(b).iter()) {
+            assert_tree_eq(&a.children[x], &b.children[y]);
+        }
+    }
+
+    #[test]
+    fn rescan_subtree_matches_full_scan() {
+        let tmp = std::env::temp_dir().join(format!("space-mesh-rescan-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("a/deep")).unwrap();
+        fs::create_dir_all(tmp.join("b")).unwrap();
+        write_file(&tmp.join("a/one.bin"), 10_000);
+        write_file(&tmp.join("a/deep/two.bin"), 20_000);
+        write_file(&tmp.join("b/three.bin"), 5_000);
+
+        let opts = ScanOptions::default();
+        let mut result = scan(&tmp, opts.clone()).unwrap();
+
+        // 서브트리 변경: 파일 커짐 + 새 파일.
+        write_file(&tmp.join("a/deep/two.bin"), 50_000);
+        write_file(&tmp.join("a/deep/new.bin"), 7_000);
+
+        let delta = rescan_subtree(&mut result.root, &tmp, Path::new("a/deep"), &opts).unwrap();
+        assert_eq!(delta.files, 1);
+        assert!(delta.logical > 0);
+
+        let full = scan(&tmp, opts).unwrap();
+        assert_tree_eq(&result.root, &full.root);
+    }
+
+    #[test]
+    fn rescan_subtree_removes_deleted_dir() {
+        let tmp = std::env::temp_dir().join(format!("space-mesh-rmdir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("gone")).unwrap();
+        write_file(&tmp.join("gone/x.bin"), 30_000);
+        write_file(&tmp.join("keep.bin"), 1_000);
+
+        let opts = ScanOptions::default();
+        let mut result = scan(&tmp, opts.clone()).unwrap();
+        fs::remove_dir_all(tmp.join("gone")).unwrap();
+
+        let delta = rescan_subtree(&mut result.root, &tmp, Path::new("gone"), &opts).unwrap();
+        assert!(delta.logical <= -30_000);
+        assert!(result.root.children.iter().all(|c| c.name != "gone"));
+
+        let full = scan(&tmp, opts).unwrap();
+        assert_tree_eq(&result.root, &full.root);
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn rescan_subtree_discovers_new_dir_via_ancestor() {
+        let tmp = std::env::temp_dir().join(format!("space-mesh-newdir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("a")).unwrap();
+        write_file(&tmp.join("a/one.bin"), 2_000);
+
+        let opts = ScanOptions::default();
+        let mut result = scan(&tmp, opts.clone()).unwrap();
+
+        // 스캔 이후 생긴 디렉토리 — 트리에 없는 경로를 지정해도 조상 재스캔으로 발견돼야 한다.
+        fs::create_dir_all(tmp.join("a/fresh/inner")).unwrap();
+        write_file(&tmp.join("a/fresh/inner/f.bin"), 9_000);
+
+        rescan_subtree(&mut result.root, &tmp, Path::new("a/fresh/inner"), &opts).unwrap();
+
+        let full = scan(&tmp, opts).unwrap();
+        assert_tree_eq(&result.root, &full.root);
         fs::remove_dir_all(&tmp).unwrap();
     }
 

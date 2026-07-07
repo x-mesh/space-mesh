@@ -3,6 +3,7 @@
 //! 스캔 트리(디렉토리 집계 + 대용량 파일)를 저장해 앱/CLI 재실행 시
 //! 재스캔 없이 이전 상태를 즉시 로드한다. FSEvents 증분 반영은 M4에서 이 위에 얹는다.
 
+pub use rusqlite;
 use rusqlite::{params, Connection};
 use space_scanner::{DirNode, FileEntry, ScanResult};
 use std::collections::HashMap;
@@ -49,7 +50,111 @@ pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_big_files_scan ON big_files(scan_id);",
     )?;
+    migrate(&conn)?;
     Ok(conn)
+}
+
+/// 스키마 버전. PRAGMA user_version으로 추적한다 (0 = Phase 1 초기 스키마).
+const SCHEMA_VERSION: i64 = 1;
+
+/// user_version 기반 순차 마이그레이션. 각 단계는 멱등적이지 않아도 되지만
+/// (버전 검사로 1회만 실행) 실패 시 버전을 올리지 않아 다음 open에서 재시도된다.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let mut version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version < 1 {
+        // v1: 회수 실행 이력 (F1). 예상 vs 측정 회수량을 남겨 '변화' 탭 마커로 쓴다.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS reclaim_log (
+                id INTEGER PRIMARY KEY,
+                executed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+                root_path TEXT NOT NULL,
+                item_count INTEGER NOT NULL,
+                estimated INTEGER NOT NULL,
+                measured INTEGER,
+                undone INTEGER NOT NULL DEFAULT 0
+            );",
+        )?;
+        version = 1;
+        conn.pragma_update(None, "user_version", version)?;
+    }
+    debug_assert_eq!(version, SCHEMA_VERSION);
+    Ok(())
+}
+
+// ───────────────────────── 회수 이력 (F1) ─────────────────────────
+
+pub struct ReclaimRecord {
+    pub id: i64,
+    pub executed_at: String,
+    pub root_path: String,
+    pub item_count: u64,
+    pub estimated: u64,
+    /// 실행 후 증분 재스캔으로 측정한 실제 회수량. None = 측정 실패/미측정.
+    pub measured: Option<i64>,
+    pub undone: bool,
+}
+
+/// 회수 실행 기록을 남기고 id를 반환한다. measured는 검증 후 update로 채운다.
+pub fn reclaim_log_add(
+    conn: &Connection,
+    root_path: &Path,
+    item_count: u64,
+    estimated: u64,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO reclaim_log (root_path, item_count, estimated) VALUES (?1, ?2, ?3)",
+        params![
+            root_path.to_string_lossy().into_owned(),
+            item_count as i64,
+            estimated as i64
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 검증 재스캔이 끝난 뒤 측정 회수량을 기록한다 (양수 = 실제로 줄어든 양).
+pub fn reclaim_log_set_measured(conn: &Connection, id: i64, measured: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE reclaim_log SET measured = ?2 WHERE id = ?1",
+        params![id, measured],
+    )?;
+    Ok(())
+}
+
+/// undo 실행 표시.
+pub fn reclaim_log_set_undone(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE reclaim_log SET undone = 1 WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// 해당 루트의 회수 이력 (최신순, limit개).
+pub fn reclaim_log_list(
+    conn: &Connection,
+    root_path: &Path,
+    limit: u32,
+) -> rusqlite::Result<Vec<ReclaimRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, executed_at, root_path, item_count, estimated, measured, undone
+         FROM reclaim_log WHERE root_path = ?1 ORDER BY id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        params![root_path.to_string_lossy().into_owned(), limit as i64],
+        |r| {
+            Ok(ReclaimRecord {
+                id: r.get(0)?,
+                executed_at: r.get(1)?,
+                root_path: r.get(2)?,
+                item_count: r.get::<_, i64>(3)? as u64,
+                estimated: r.get::<_, i64>(4)? as u64,
+                measured: r.get(5)?,
+                undone: r.get::<_, i64>(6)? != 0,
+            })
+        },
+    )?;
+    rows.collect()
 }
 
 /// 스캔 결과 전체를 하나의 트랜잭션으로 저장하고 scan_id를 반환한다.
@@ -58,13 +163,30 @@ pub fn save_snapshot(
     root_path: &Path,
     result: &ScanResult,
 ) -> rusqlite::Result<i64> {
+    save_tree(
+        conn,
+        root_path,
+        &result.root,
+        result.stats.total_files,
+        result.stats.total_dirs,
+    )
+}
+
+/// 트리 참조로 저장하는 변형 — 증분 갱신된(소유권 없는) 트리를 스냅샷으로 남길 때 쓴다.
+pub fn save_tree(
+    conn: &mut Connection,
+    root_path: &Path,
+    root: &DirNode,
+    total_files: u64,
+    total_dirs: u64,
+) -> rusqlite::Result<i64> {
     let tx = conn.transaction()?;
     tx.execute(
         "INSERT INTO scans (root_path, total_files, total_dirs) VALUES (?1, ?2, ?3)",
         params![
             root_path.to_string_lossy(),
-            result.stats.total_files as i64,
-            result.stats.total_dirs as i64
+            total_files as i64,
+            total_dirs as i64
         ],
     )?;
     let scan_id = tx.last_insert_rowid();
@@ -80,7 +202,7 @@ pub fn save_snapshot(
 
         // 명시적 스택으로 순회 (트리 깊이에 따른 콜스택 부담 회피).
         let mut next_id: i64 = 0;
-        let mut stack: Vec<(&DirNode, Option<i64>)> = vec![(&result.root, None)];
+        let mut stack: Vec<(&DirNode, Option<i64>)> = vec![(root, None)];
         while let Some((node, parent_id)) = stack.pop() {
             let node_id = next_id;
             next_id += 1;
@@ -217,7 +339,9 @@ fn load_tree(conn: &Connection, scan_id: i64) -> rusqlite::Result<Option<DirNode
         }
     }
 
-    let Some(mut root_row) = root_row else { return Ok(None) };
+    let Some(mut root_row) = root_row else {
+        return Ok(None);
+    };
     attach(&mut root_row, &mut children_of, &mut big);
     Ok(Some(root_row.node))
 }
@@ -264,6 +388,42 @@ mod tests {
             count(&loaded)
         };
         assert_eq!(total_big, 2);
+
+        drop(conn);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn reclaim_log_roundtrip_and_migration() {
+        let tmp = std::env::temp_dir().join(format!("space-index-rl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let db = tmp.join("snap.db");
+
+        let conn = open(&db).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        let root = Path::new("/tmp/example-root");
+        let id = reclaim_log_add(&conn, root, 3, 1_000_000).unwrap();
+        reclaim_log_set_measured(&conn, id, 900_000).unwrap();
+
+        let records = reclaim_log_list(&conn, root, 10).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].item_count, 3);
+        assert_eq!(records[0].estimated, 1_000_000);
+        assert_eq!(records[0].measured, Some(900_000));
+        assert!(!records[0].undone);
+
+        reclaim_log_set_undone(&conn, id).unwrap();
+        assert!(reclaim_log_list(&conn, root, 10).unwrap()[0].undone);
+
+        // 재-open해도 마이그레이션이 멱등이어야 한다.
+        drop(conn);
+        let conn = open(&db).unwrap();
+        assert_eq!(reclaim_log_list(&conn, root, 10).unwrap().len(), 1);
 
         drop(conn);
         let _ = fs::remove_dir_all(&tmp);
@@ -326,10 +486,7 @@ pub fn diff_snapshots(
 /// 이미 로드된 두 트리의 diff — 반복 조회(drilldown) 시 트리를 상주시켜 재사용한다.
 pub fn diff_trees(old: Option<&DirNode>, new: Option<&DirNode>, min_delta: u64) -> Vec<DiffEntry> {
     let mut out = Vec::new();
-    let root_name = new
-        .or(old)
-        .map(|n| n.name.clone())
-        .unwrap_or_default();
+    let root_name = new.or(old).map(|n| n.name.clone()).unwrap_or_default();
     attribute(old, new, &root_name, min_delta as i64, &mut out);
     out.sort_by(|a, b| b.delta.abs().cmp(&a.delta.abs()));
     out
@@ -367,7 +524,11 @@ fn attribute(
             new_children.insert(c.name.as_str(), c);
         }
     }
-    let mut names: Vec<&str> = old_children.keys().chain(new_children.keys()).copied().collect();
+    let mut names: Vec<&str> = old_children
+        .keys()
+        .chain(new_children.keys())
+        .copied()
+        .collect();
     names.sort_unstable();
     names.dedup();
 
@@ -429,7 +590,11 @@ mod diff_tests {
         let entries = diff_snapshots(&conn, id1, id2, 100_000).unwrap();
         assert_eq!(entries.len(), 1, "{:?}", entries);
         // 범인은 최상위가 아니라 실제 변화가 생긴 깊은 디렉토리로 귀속되어야 한다.
-        assert!(entries[0].path.ends_with("growing/deep"), "{}", entries[0].path);
+        assert!(
+            entries[0].path.ends_with("growing/deep"),
+            "{}",
+            entries[0].path
+        );
         assert!(entries[0].delta >= 500_000);
 
         // 목록/개별 로드도 확인.
@@ -507,7 +672,13 @@ pub fn git_cache_put(
          ON CONFLICT(repo_path) DO UPDATE SET
            git_sig=excluded.git_sig, tree_sig=excluded.tree_sig,
            health_json=excluded.health_json, computed_at=excluded.computed_at",
-        rusqlite::params![repo_path, git_sig as i64, tree_sig as i64, health_json, now_secs as i64],
+        rusqlite::params![
+            repo_path,
+            git_sig as i64,
+            tree_sig as i64,
+            health_json,
+            now_secs as i64
+        ],
     )?;
     Ok(())
 }

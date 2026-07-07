@@ -15,33 +15,88 @@ enum ViewMode: String, CaseIterable {
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @StateObject private var cleanup = CleanupModel()
+    @StateObject private var plan = ReclaimPlan()
     @State private var scanTarget = NSHomeDirectory()
     @State private var previewURL: URL?
     @State private var mode: ViewMode = .treemap
+    @State private var fdaBannerDismissed = false
 
     var body: some View {
         VStack(spacing: 0) {
             toolbar
             Rectangle().fill(Theme.border).frame(height: 1)
+            if showFdaBanner {
+                fdaBanner
+                Rectangle().fill(Theme.border).frame(height: 1)
+            }
             switch mode {
             case .treemap:
                 treemapSection
             case .changes:
                 ChangesView(scanTarget: scanTarget)
             case .categories:
-                CategoriesView(model: cleanup, scanTarget: scanTarget)
+                CategoriesView(model: cleanup, plan: plan, scanTarget: scanTarget)
             case .git:
                 GitView(scanTarget: scanTarget)
             case .cleanup:
-                CleanupView(model: cleanup)
+                CleanupView(model: cleanup, plan: plan)
             case .duplicates:
-                DuplicatesView(model: cleanup, defaultRoot: scanTarget)
+                DuplicatesView(model: cleanup, plan: plan, defaultRoot: scanTarget)
+            }
+            // 통합 회수 플랜 트레이 — 어느 탭에서 담았든 여기 하나로 모인다.
+            if !plan.items.isEmpty || plan.report != nil || !plan.lastBatch.isEmpty {
+                Rectangle().fill(Theme.border).frame(height: 1)
+                ReclaimTrayView(plan: plan)
             }
         }
         .background(Theme.bg)
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
         .quickLookPreview($previewURL)
+    }
+
+    // MARK: - Full Disk Access 안내 (F9)
+
+    /// 권한 거부 스킵이 유의미하게 많으면 결과가 과소 집계될 수 있음을 알린다.
+    private var showFdaBanner: Bool {
+        guard !fdaBannerDismissed, let stats = model.stats else { return false }
+        return stats.permissionErrors >= 50
+    }
+
+    private var fdaBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.warn)
+            Text(
+                "권한 거부로 \(model.stats.map { $0.permissionErrors.formatted() } ?? "0")개 항목을 읽지 못했습니다 — 전체 디스크 접근을 허용하면 정확해집니다"
+            )
+            .font(.system(size: 11.5))
+            .foregroundStyle(Theme.textDim)
+            Spacer()
+            Button("시스템 설정 열기") {
+                if let url = URL(
+                    string:
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+                {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.accent)
+            Button {
+                fdaBannerDismissed = true
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Theme.textFaint)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Theme.panel)
     }
 
     @ViewBuilder
@@ -289,6 +344,13 @@ struct ContentView: View {
                             Button("Finder에서 보기") {
                                 NSWorkspace.shared.activateFileViewerSelecting(
                                     [URL(fileURLWithPath: file.path)])
+                            }
+                            Button("회수 플랜에 담기") {
+                                // 트리맵의 대용량 파일은 정체 미상 — warn으로 담아 시트에서 재확인.
+                                plan.add(
+                                    PlanItem(
+                                        path: file.path, estimatedBytes: file.allocatedSize,
+                                        source: .bigFile, safety: "warn", recreateCommand: ""))
                             }
                         }
                         .listRowBackground(Theme.bg)

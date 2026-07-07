@@ -5,6 +5,7 @@ import SwiftUI
 /// 룰 기반 불필요 파일 탐지 + Cleanup Cart.
 struct CleanupView: View {
     @ObservedObject var model: CleanupModel
+    @ObservedObject var plan: ReclaimPlan
     @State private var confirmTrash = false
 
     private var selected: [CleanupCandidate] {
@@ -39,7 +40,17 @@ struct CleanupView: View {
                 undoAvailable: !model.lastBatch.isEmpty,
                 onTrash: { confirmTrash = true },
                 onUndo: { model.undoLastBatch() },
-                onRefresh: { model.detect() }
+                onRefresh: { model.detect() },
+                onAddToPlan: {
+                    plan.add(
+                        selected.map {
+                            PlanItem(
+                                path: $0.path, estimatedBytes: $0.allocatedSize,
+                                source: .rule, safety: $0.safety,
+                                recreateCommand: $0.recreateCommand)
+                        })
+                    model.selectedCleanupPaths = []
+                }
             )
         }
         .onAppear {
@@ -232,6 +243,8 @@ struct CartBar: View {
     let onTrash: () -> Void
     let onUndo: () -> Void
     let onRefresh: () -> Void
+    /// 선택 항목을 통합 회수 플랜에 담는다 (F1). nil이면 버튼 미표시.
+    var onAddToPlan: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 14) {
@@ -267,6 +280,27 @@ struct CartBar: View {
             }
             .buttonStyle(.plain)
             .help("다시 검사")
+            if let onAddToPlan {
+                Button {
+                    onAddToPlan()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "tray.and.arrow.down")
+                            .font(.system(size: 10, weight: .bold))
+                        Text("플랜에 담기")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundStyle(selectedCount == 0 ? Theme.textFaint : Theme.textDim)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6).stroke(Theme.border, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(selectedCount == 0)
+                .help("여러 탭의 후보를 모아 한 번에 검토·실행합니다")
+            }
             if undoAvailable {
                 Button {
                     onUndo()

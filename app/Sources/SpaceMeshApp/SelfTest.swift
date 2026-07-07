@@ -3,6 +3,8 @@ import SpaceMeshCore
 
 /// `swift run SpaceMeshApp --selftest` — GUI 없이 FFI 경로를 end-to-end 검증한다.
 enum SelfTest {
+    /// App.init(MainActor)에서 호출 — ReclaimPlan 등 MainActor 모델 검증을 위해 격리 유지.
+    @MainActor
     static func runIfRequested() {
         guard CommandLine.arguments.contains("--selftest") else { return }
         do {
@@ -44,6 +46,9 @@ enum SelfTest {
             failures.append(contentsOf: testSnapshotDiff())
             failures.append(contentsOf: testCliPath())
             failures.append(contentsOf: testGitRepos())
+            failures.append(contentsOf: testRefreshPaths())
+            failures.append(contentsOf: testReclaimLog())
+            failures.append(contentsOf: testPlanMerge())
             if failures.isEmpty {
                 print("SELFTEST OK — files=\(stats.totalFiles) dirs=\(stats.totalDirs) root=\(root.allocatedSize)B + cleanup/dedup/trash-undo")
                 exit(0)
@@ -217,6 +222,116 @@ enum SelfTest {
         } catch {
             return ["cli: 실행 실패 \(error)"]
         }
+    }
+
+    /// refreshPaths — 증분 재스캔이 추가/삭제를 반영하고 루트 밖 경로를 무시하는지 (F2).
+    private static func testRefreshPaths() -> [String] {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory
+            .appendingPathComponent("space-mesh-refresh-\(ProcessInfo.processInfo.processIdentifier)")
+        defer { try? fm.removeItem(at: tmp) }
+        do {
+            let sub = tmp.appendingPathComponent("sub")
+            try fm.createDirectory(at: sub, withIntermediateDirectories: true)
+            try Data(repeating: 1, count: 2_000_000).write(to: sub.appendingPathComponent("a.bin"))
+
+            let handle = try scanPath(path: tmp.path, minFileMib: 1)
+            let before = try handle.nodeAt(indexPath: []).logicalSize
+
+            // 추가 반영.
+            try Data(repeating: 2, count: 5_000_000).write(to: sub.appendingPathComponent("b.bin"))
+            let summary = try handle.refreshPaths(absPaths: [sub.path], minFileMib: 1)
+            var failures: [String] = []
+            if summary.refreshedSubtrees != 1 {
+                failures.append("refresh: subtrees=\(summary.refreshedSubtrees) != 1")
+            }
+            let grown = try handle.nodeAt(indexPath: []).logicalSize
+            if grown != before + 5_000_000 {
+                failures.append("refresh: 추가 미반영 \(before) → \(grown)")
+            }
+
+            // 삭제 반영.
+            try fm.removeItem(at: sub.appendingPathComponent("b.bin"))
+            _ = try handle.refreshPaths(absPaths: [sub.path], minFileMib: 1)
+            let shrunk = try handle.nodeAt(indexPath: []).logicalSize
+            if shrunk != before { failures.append("refresh: 삭제 미반영 \(shrunk) != \(before)") }
+
+            // 루트 밖 경로는 무시.
+            let outside = try handle.refreshPaths(absPaths: ["/no-such-outside-root"], minFileMib: 1)
+            if outside.refreshedSubtrees != 0 {
+                failures.append("refresh: 루트 밖 경로가 재스캔됨")
+            }
+
+            // 갱신된 트리를 스냅샷으로 저장할 수 있어야 한다 (live 모드 경로).
+            let db = tmp.appendingPathComponent("refresh.db")
+            if (try? handle.saveToDb(dbPath: db.path)) == nil {
+                failures.append("refresh: saveToDb 실패")
+            }
+            return failures
+        } catch {
+            return ["refresh: \(error)"]
+        }
+    }
+
+    /// reclaim_log — 기록/실측/undo 라운드트립 (F1).
+    private static func testReclaimLog() -> [String] {
+        let fm = FileManager.default
+        let db = fm.temporaryDirectory
+            .appendingPathComponent("space-mesh-rl-\(ProcessInfo.processInfo.processIdentifier).db")
+        defer { try? fm.removeItem(at: db) }
+        do {
+            let root = "/tmp/reclaim-fixture"
+            let id = try reclaimLogAdd(
+                dbPath: db.path, rootPath: root, itemCount: 3, estimated: 1_000_000)
+            try reclaimLogSetMeasured(dbPath: db.path, id: id, measured: 900_000)
+            var records = try reclaimLogList(dbPath: db.path, rootPath: root, limit: 10)
+            var failures: [String] = []
+            guard records.count == 1 else { return ["reclaim: records=\(records.count) != 1"] }
+            if records[0].estimated != 1_000_000 {
+                failures.append("reclaim: estimated=\(records[0].estimated)")
+            }
+            if records[0].measured != 900_000 {
+                failures.append("reclaim: measured=\(String(describing: records[0].measured))")
+            }
+            if records[0].undone { failures.append("reclaim: undone이 초기부터 true") }
+            try reclaimLogSetUndone(dbPath: db.path, id: id)
+            records = try reclaimLogList(dbPath: db.path, rootPath: root, limit: 10)
+            if !records[0].undone { failures.append("reclaim: undone 미반영") }
+            return failures
+        } catch {
+            return ["reclaim: \(error)"]
+        }
+    }
+
+    /// 회수 플랜의 조상/자손 병합 규칙 — 이중 계산 방지 (F1).
+    @MainActor
+    private static func testPlanMerge() -> [String] {
+        let plan = ReclaimPlan()
+        let child = PlanItem(
+            path: "/Users/x/proj/node_modules/sub", estimatedBytes: 100,
+            source: .category, safety: "safe", recreateCommand: "")
+        let parent = PlanItem(
+            path: "/Users/x/proj/node_modules", estimatedBytes: 500,
+            source: .category, safety: "safe", recreateCommand: "")
+        var failures: [String] = []
+
+        // 자손 → 조상: 조상이 자손을 밀어낸다.
+        plan.add(child)
+        plan.add(parent)
+        if plan.items.map(\.path) != [parent.path] {
+            failures.append("plan: 조상 추가 시 자손 미제거 (\(plan.items.map(\.path)))")
+        }
+        // 조상이 있으면 자손은 무시.
+        plan.add(child)
+        if plan.items.count != 1 {
+            failures.append("plan: 조상 존재 시 자손이 추가됨")
+        }
+        // 중복 추가 무시 + 합계.
+        plan.add(parent)
+        if plan.items.count != 1 || plan.totalEstimated != 500 {
+            failures.append("plan: 중복/합계 오류 (count=\(plan.items.count), total=\(plan.totalEstimated))")
+        }
+        return failures
     }
 
     /// 휴지통 이동 + 복원 + 안전 가드.
