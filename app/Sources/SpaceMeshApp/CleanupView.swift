@@ -42,13 +42,7 @@ struct CleanupView: View {
                 onUndo: { model.undoLastBatch() },
                 onRefresh: { model.detect() },
                 onAddToPlan: {
-                    plan.add(
-                        selected.map {
-                            PlanItem(
-                                path: $0.path, estimatedBytes: $0.allocatedSize,
-                                source: .rule, safety: $0.safety,
-                                recreateCommand: $0.recreateCommand)
-                        })
+                    plan.add(selected.map(PlanItem.init))
                     model.selectedCleanupPaths = []
                 }
             )

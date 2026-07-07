@@ -22,6 +22,43 @@ struct PlanItem: Identifiable, Equatable {
     let recreateCommand: String
 }
 
+/// 각 탭의 후보 타입 → PlanItem 변환은 여기 한 곳에만 둔다 — 출처(source)와
+/// safety 정책이 뷰마다 흩어져 드리프트하지 않게 (리뷰 지적).
+extension PlanItem {
+    init(_ c: CleanupCandidate) {
+        self.init(
+            path: c.path, estimatedBytes: c.allocatedSize, source: .rule,
+            safety: c.safety, recreateCommand: c.recreateCommand)
+    }
+
+    init(_ h: CategoryHitInfo) {
+        self.init(
+            path: h.path, estimatedBytes: h.allocatedSize, source: .category,
+            safety: h.safety, recreateCommand: h.recreateCommand)
+    }
+
+    init(_ s: SuggestionItem) {
+        self.init(
+            path: s.path, estimatedBytes: s.estimated,
+            source: s.source == "category" ? .category : .rule,
+            safety: s.safety, recreateCommand: s.recreateCommand)
+    }
+
+    /// 중복 파일 — 사용자 데이터라 사본이 남더라도 warn으로 담아 시트에서 재확인.
+    init(duplicatePath path: String, estimated: UInt64) {
+        self.init(
+            path: path, estimatedBytes: estimated, source: .duplicate,
+            safety: "warn", recreateCommand: "")
+    }
+
+    /// 트리맵 대용량 파일 — 정체 미상이라 warn.
+    init(_ f: BigFile) {
+        self.init(
+            path: f.path, estimatedBytes: f.allocatedSize, source: .bigFile,
+            safety: "warn", recreateCommand: "")
+    }
+}
+
 /// 실행 결과 — 예상 vs 실측 회수량 (F1의 핵심 신뢰 지표).
 struct ReclaimReport {
     let movedCount: Int
@@ -53,10 +90,10 @@ final class ReclaimPlan: ObservableObject {
 
     func add(_ item: PlanItem) {
         // 같은 경로나 조상이 이미 담겨 있으면 무시, 자손이 담겨 있으면 자손을 밀어낸다.
-        if items.contains(where: { $0.path == item.path || item.path.hasPrefix($0.path + "/") }) {
+        if items.contains(where: { isSameOrDescendant(item.path, of: $0.path) }) {
             return
         }
-        items.removeAll { $0.path.hasPrefix(item.path + "/") }
+        items.removeAll { isSameOrDescendant($0.path, of: item.path) && $0.path != item.path }
         items.append(item)
     }
 
@@ -82,28 +119,9 @@ final class ReclaimPlan: ObservableObject {
         report = nil
         message = nil
 
-        // 휴지통 이동 — 안전 가드는 즉시 삭제 경로와 동일하게 적용.
-        var batch: [TrashRecord] = []
-        var skipped = 0
-        let fm = FileManager.default
-        for item in targets {
-            guard CleanupModel.isSafeToTrash(item.path) else {
-                skipped += 1
-                continue
-            }
-            var resultURL: NSURL?
-            do {
-                try fm.trashItem(
-                    at: URL(fileURLWithPath: item.path), resultingItemURL: &resultURL)
-                if let trashURL = resultURL as URL? {
-                    batch.append(
-                        TrashRecord(
-                            original: item.path, trashURL: trashURL, size: item.estimatedBytes))
-                }
-            } catch {
-                skipped += 1
-            }
-        }
+        // 휴지통 이동 — 즉시 삭제 경로와 같은 공용 구현(안전 가드 포함).
+        let (batch, skipped) = moveToTrash(
+            paths: targets.map { ($0.path, $0.estimatedBytes) })
         lastBatch = batch
         let movedPaths = Set(batch.map(\.original))
         items.removeAll { movedPaths.contains($0.path) }
@@ -138,17 +156,7 @@ final class ReclaimPlan: ObservableObject {
 
     /// 마지막 배치를 휴지통에서 복원하고 트리를 다시 실측한다.
     func undoLastBatch(appModel: AppModel) {
-        let fm = FileManager.default
-        var restored = 0
-        for record in lastBatch.reversed() {
-            do {
-                try fm.moveItem(
-                    at: record.trashURL, to: URL(fileURLWithPath: record.original))
-                restored += 1
-            } catch {
-                // 이미 휴지통이 비워졌거나 원위치에 새 항목이 생긴 경우.
-            }
-        }
+        let restored = restoreFromTrash(lastBatch)
         if let logId = lastLogId {
             try? reclaimLogSetUndone(dbPath: AppModel.dbPath, id: logId)
         }

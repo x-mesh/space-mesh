@@ -341,61 +341,16 @@ fn run_advise(args: &Args) {
     }
 }
 
-/// 정책 평가 (F6): safe 룰 후보 전부 + 유휴 프로젝트의 verified safe 빌드 산출물.
-/// 합계가 suggest_min_mib 미만이면 항목을 비워 소음을 막는다 (below_threshold로 표시).
-fn build_suggestions(args: &Args, root: &DirNode) -> serde_json::Value {
-    let mut items: Vec<serde_json::Value> = Vec::new();
-    let mut total: u64 = 0;
-
-    for c in space_rules::detect(&home_dir(args)) {
-        if c.rule.safety != "safe" {
-            continue;
-        }
-        total += c.allocated_size;
-        items.push(serde_json::json!({
-            "path": c.resolved_path,
-            "title": c.rule.title,
-            "source": "rule",
-            "safety": c.rule.safety,
-            "estimated": c.allocated_size,
-            "recreate_command": c.rule.recreate_command,
-            "idle_days": serde_json::Value::Null,
-        }));
-    }
-
-    let hits = space_rules::categories::find_categories(root, args.scan_root());
-    let idle = space_rules::categories::annotate_idle(&hits);
-    for h in &hits {
-        let days = idle.get(&h.project_path).copied();
-        if !h.verified || h.def.safety != "safe" || days.unwrap_or(0) < args.idle_days {
-            continue;
-        }
-        total += h.allocated_size;
-        items.push(serde_json::json!({
-            "path": h.path,
-            "title": h.def.title,
-            "source": "category",
-            "safety": h.def.safety,
-            "estimated": h.allocated_size,
-            "recreate_command": h.def.recreate_command,
-            "idle_days": days,
-        }));
-    }
-
-    let below = total < args.suggest_min_mib * 1024 * 1024;
-    let generated_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    serde_json::json!({
-        "version": 1,
-        "generated_at": generated_at,
-        "root": args.scan_root(),
-        "idle_days": args.idle_days,
-        "total_estimated": total,
-        "below_threshold": below,
-        "items": if below { Vec::new() } else { items },
-    })
+/// 정책 평가 (F6) — 정책·스키마는 space_rules::suggest 한 곳에만 있다
+/// (앱 FFI와 공유; 이중 구현 시 주기/live 모드의 제안이 어긋난다).
+fn build_suggestions(args: &Args, root: &DirNode) -> space_rules::suggest::Suggestion {
+    space_rules::suggest::build(
+        root,
+        args.scan_root(),
+        &home_dir(args),
+        args.idle_days,
+        args.suggest_min_mib * 1024 * 1024,
+    )
 }
 
 /// 최근 두 스냅샷 비교 — 변화의 범인 출력.

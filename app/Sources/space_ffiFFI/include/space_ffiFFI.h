@@ -336,6 +336,11 @@ int64_t uniffi_space_ffi_fn_method_scanhandle_save_to_db(void*_Nonnull ptr, Rust
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_stats(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_SUGGESTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_SUGGESTIONS
+RustBuffer uniffi_space_ffi_fn_method_scanhandle_suggestions(void*_Nonnull ptr, uint64_t idle_days, uint64_t min_bytes, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_TOP_FILES
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_TOP_FILES
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_top_files(void*_Nonnull ptr, uint32_t limit, RustCallStatus *_Nonnull out_status
@@ -874,6 +879,12 @@ uint16_t uniffi_space_ffi_checksum_method_scanhandle_save_to_db(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_STATS
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_STATS
 uint16_t uniffi_space_ffi_checksum_method_scanhandle_stats(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_SUGGESTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_SUGGESTIONS
+uint16_t uniffi_space_ffi_checksum_method_scanhandle_suggestions(void
     
 );
 #endif

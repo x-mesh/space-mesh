@@ -82,13 +82,7 @@ struct ContentView: View {
             .foregroundStyle(Theme.textDim)
             Spacer()
             Button("플랜에 담기") {
-                plan.add(
-                    suggestion.items.map {
-                        PlanItem(
-                            path: $0.path, estimatedBytes: $0.estimated,
-                            source: $0.source == "category" ? .category : .rule,
-                            safety: $0.safety, recreateCommand: $0.recreateCommand)
-                    })
+                plan.add(suggestion.items.map(PlanItem.init))
                 suggestions.dismissed = true
             }
             .font(.system(size: 11, weight: .semibold))
@@ -423,11 +417,7 @@ struct ContentView: View {
                                     [URL(fileURLWithPath: file.path)])
                             }
                             Button("회수 플랜에 담기") {
-                                // 트리맵의 대용량 파일은 정체 미상 — warn으로 담아 시트에서 재확인.
-                                plan.add(
-                                    PlanItem(
-                                        path: file.path, estimatedBytes: file.allocatedSize,
-                                        source: .bigFile, safety: "warn", recreateCommand: ""))
+                                plan.add(PlanItem(file))
                             }
                         }
                         .listRowBackground(Theme.bg)

@@ -82,13 +82,7 @@ struct CategoriesView: View {
                 onUndo: { model.undoLastBatch() },
                 onRefresh: { reload() },
                 onAddToPlan: {
-                    plan.add(
-                        hits.filter { selected.contains($0.path) }.map {
-                            PlanItem(
-                                path: $0.path, estimatedBytes: $0.allocatedSize,
-                                source: .category, safety: $0.safety,
-                                recreateCommand: $0.recreateCommand)
-                        })
+                    plan.add(hits.filter { selected.contains($0.path) }.map(PlanItem.init))
                     selected = []
                 }
             )

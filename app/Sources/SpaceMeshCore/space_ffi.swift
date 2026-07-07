@@ -749,6 +749,13 @@ public protocol ScanHandleProtocol: AnyObject, Sendable {
     func stats()  -> ScanStatsInfo
     
     /**
+     * 정책 기반 회수 제안 — CLI --suggest와 동일한 단일 정책
+     * (space_rules::suggest). 블로킹(룰 경로 측정 + git 조회) —
+     * 백그라운드에서 호출. 홈은 $HOME 기준.
+     */
+    func suggestions(idleDays: UInt64, minBytes: UInt64)  -> SuggestionInfo
+    
+    /**
      * 트리 전체에서 가장 큰 파일 top-N.
      */
     func topFiles(limit: UInt32)  -> [BigFile]
@@ -926,6 +933,20 @@ open func saveToDb(dbPath: String)throws  -> Int64  {
 open func stats() -> ScanStatsInfo  {
     return try!  FfiConverterTypeScanStatsInfo_lift(try! rustCall() {
     uniffi_space_ffi_fn_method_scanhandle_stats(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * 정책 기반 회수 제안 — CLI --suggest와 동일한 단일 정책
+     * (space_rules::suggest). 블로킹(룰 경로 측정 + git 조회) —
+     * 백그라운드에서 호출. 홈은 $HOME 기준.
+     */
+open func suggestions(idleDays: UInt64, minBytes: UInt64) -> SuggestionInfo  {
+    return try!  FfiConverterTypeSuggestionInfo_lift(try! rustCall() {
+    uniffi_space_ffi_fn_method_scanhandle_suggestions(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(idleDays),
+        FfiConverterUInt64.lower(minBytes),$0
     )
 })
 }
@@ -2646,6 +2667,208 @@ public func FfiConverterTypeSnapshotInfo_lower(_ value: SnapshotInfo) -> RustBuf
 }
 
 
+public struct SuggestionInfo {
+    public var generatedAt: UInt64
+    public var totalEstimated: UInt64
+    public var belowThreshold: Bool
+    public var items: [SuggestionItemInfo]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(generatedAt: UInt64, totalEstimated: UInt64, belowThreshold: Bool, items: [SuggestionItemInfo]) {
+        self.generatedAt = generatedAt
+        self.totalEstimated = totalEstimated
+        self.belowThreshold = belowThreshold
+        self.items = items
+    }
+}
+
+#if compiler(>=6)
+extension SuggestionInfo: Sendable {}
+#endif
+
+
+extension SuggestionInfo: Equatable, Hashable {
+    public static func ==(lhs: SuggestionInfo, rhs: SuggestionInfo) -> Bool {
+        if lhs.generatedAt != rhs.generatedAt {
+            return false
+        }
+        if lhs.totalEstimated != rhs.totalEstimated {
+            return false
+        }
+        if lhs.belowThreshold != rhs.belowThreshold {
+            return false
+        }
+        if lhs.items != rhs.items {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(generatedAt)
+        hasher.combine(totalEstimated)
+        hasher.combine(belowThreshold)
+        hasher.combine(items)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSuggestionInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SuggestionInfo {
+        return
+            try SuggestionInfo(
+                generatedAt: FfiConverterUInt64.read(from: &buf), 
+                totalEstimated: FfiConverterUInt64.read(from: &buf), 
+                belowThreshold: FfiConverterBool.read(from: &buf), 
+                items: FfiConverterSequenceTypeSuggestionItemInfo.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SuggestionInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.generatedAt, into: &buf)
+        FfiConverterUInt64.write(value.totalEstimated, into: &buf)
+        FfiConverterBool.write(value.belowThreshold, into: &buf)
+        FfiConverterSequenceTypeSuggestionItemInfo.write(value.items, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSuggestionInfo_lift(_ buf: RustBuffer) throws -> SuggestionInfo {
+    return try FfiConverterTypeSuggestionInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSuggestionInfo_lower(_ value: SuggestionInfo) -> RustBuffer {
+    return FfiConverterTypeSuggestionInfo.lower(value)
+}
+
+
+public struct SuggestionItemInfo {
+    public var path: String
+    public var title: String
+    /**
+     * "rule" | "category"
+     */
+    public var source: String
+    public var safety: String
+    public var estimated: UInt64
+    public var recreateCommand: String
+    public var idleDays: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(path: String, title: String, 
+        /**
+         * "rule" | "category"
+         */source: String, safety: String, estimated: UInt64, recreateCommand: String, idleDays: UInt64?) {
+        self.path = path
+        self.title = title
+        self.source = source
+        self.safety = safety
+        self.estimated = estimated
+        self.recreateCommand = recreateCommand
+        self.idleDays = idleDays
+    }
+}
+
+#if compiler(>=6)
+extension SuggestionItemInfo: Sendable {}
+#endif
+
+
+extension SuggestionItemInfo: Equatable, Hashable {
+    public static func ==(lhs: SuggestionItemInfo, rhs: SuggestionItemInfo) -> Bool {
+        if lhs.path != rhs.path {
+            return false
+        }
+        if lhs.title != rhs.title {
+            return false
+        }
+        if lhs.source != rhs.source {
+            return false
+        }
+        if lhs.safety != rhs.safety {
+            return false
+        }
+        if lhs.estimated != rhs.estimated {
+            return false
+        }
+        if lhs.recreateCommand != rhs.recreateCommand {
+            return false
+        }
+        if lhs.idleDays != rhs.idleDays {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(path)
+        hasher.combine(title)
+        hasher.combine(source)
+        hasher.combine(safety)
+        hasher.combine(estimated)
+        hasher.combine(recreateCommand)
+        hasher.combine(idleDays)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSuggestionItemInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SuggestionItemInfo {
+        return
+            try SuggestionItemInfo(
+                path: FfiConverterString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                source: FfiConverterString.read(from: &buf), 
+                safety: FfiConverterString.read(from: &buf), 
+                estimated: FfiConverterUInt64.read(from: &buf), 
+                recreateCommand: FfiConverterString.read(from: &buf), 
+                idleDays: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SuggestionItemInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.source, into: &buf)
+        FfiConverterString.write(value.safety, into: &buf)
+        FfiConverterUInt64.write(value.estimated, into: &buf)
+        FfiConverterString.write(value.recreateCommand, into: &buf)
+        FfiConverterOptionUInt64.write(value.idleDays, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSuggestionItemInfo_lift(_ buf: RustBuffer) throws -> SuggestionItemInfo {
+    return try FfiConverterTypeSuggestionItemInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSuggestionItemInfo_lower(_ value: SuggestionItemInfo) -> RustBuffer {
+    return FfiConverterTypeSuggestionItemInfo.lower(value)
+}
+
+
 public struct ToolAdviceInfo {
     public var tool: String
     public var command: String
@@ -3240,6 +3463,31 @@ fileprivate struct FfiConverterSequenceTypeSnapshotInfo: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeSuggestionItemInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [SuggestionItemInfo]
+
+    public static func write(_ value: [SuggestionItemInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSuggestionItemInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SuggestionItemInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SuggestionItemInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSuggestionItemInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeToolAdviceInfo: FfiConverterRustBuffer {
     typealias SwiftType = [ToolAdviceInfo]
 
@@ -3533,6 +3781,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_stats() != 61743) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_method_scanhandle_suggestions() != 24050) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_top_files() != 2419) {

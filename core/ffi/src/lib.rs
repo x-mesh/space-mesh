@@ -327,8 +327,7 @@ impl ScanHandle {
     /// 현재 트리(증분 갱신 포함)를 스냅샷으로 저장하고 scan_id를 반환한다.
     /// live 모드가 refresh_paths 후 시계열을 계속 쌓는 데 쓴다.
     pub fn save_to_db(&self, db_path: String) -> Result<i64, ScanError> {
-        let mut conn = space_index::open(Path::new(&db_path))
-            .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+        let mut conn = open_db(&db_path)?;
         let root = self.root.read().unwrap();
         let stats = self.stats.read().unwrap().clone();
         let id = space_index::save_tree(
@@ -370,8 +369,7 @@ pub fn scan_path(path: String, min_file_mib: u64) -> Result<Arc<ScanHandle>, Sca
 /// SQLite 스냅샷에서 로드. 없으면 Snapshot 에러.
 #[uniffi::export]
 pub fn load_snapshot(db_path: String, root_path: String) -> Result<Arc<ScanHandle>, ScanError> {
-    let conn = space_index::open(Path::new(&db_path))
-        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    let conn = open_db(&db_path)?;
     let loaded = space_index::load_latest(&conn, Path::new(&root_path))
         .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
     let Some((meta, root)) = loaded else {
@@ -405,8 +403,7 @@ pub fn scan_and_save(
     };
     let result = scan_with_progress(&root_path, opts, Some(reset_progress()))
         .map_err(|e| ScanError::Io { msg: e.to_string() })?;
-    let mut conn = space_index::open(Path::new(&db_path))
-        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    let mut conn = open_db(&db_path)?;
     space_index::save_snapshot(&mut conn, &root_path, &result)
         .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
     // 보존 정책 적용 (F7) — 실패해도 스캔 결과에는 영향 없음.
@@ -592,8 +589,7 @@ pub struct DiffEntryInfo {
 /// 해당 루트의 스냅샷 목록 (최신순).
 #[uniffi::export]
 pub fn list_snapshots(db_path: String, root_path: String) -> Result<Vec<SnapshotInfo>, ScanError> {
-    let conn = space_index::open(Path::new(&db_path))
-        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    let conn = open_db(&db_path)?;
     let snaps = space_index::list_snapshots(&conn, Path::new(&root_path))
         .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
     Ok(snaps
@@ -615,8 +611,7 @@ pub fn diff_snapshots(
     new_id: i64,
     min_delta_mib: u64,
 ) -> Result<Vec<DiffEntryInfo>, ScanError> {
-    let conn = space_index::open(Path::new(&db_path))
-        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    let conn = open_db(&db_path)?;
     let entries = space_index::diff_snapshots(&conn, old_id, new_id, min_delta_mib * 1024 * 1024)
         .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
     Ok(entries
@@ -681,8 +676,7 @@ pub struct DiffChildInfo {
 
 #[uniffi::export]
 pub fn open_diff(db_path: String, old_id: i64, new_id: i64) -> Result<Arc<DiffHandle>, ScanError> {
-    let conn = space_index::open(Path::new(&db_path))
-        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    let conn = open_db(&db_path)?;
     let old = space_index::load_by_id(&conn, old_id)
         .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
     let new = space_index::load_by_id(&conn, new_id)
@@ -840,6 +834,60 @@ impl DiffHandle {
             delta: after as i64 - before as i64,
             has_children: true,
             kind: "dir".to_string(),
+        }
+    }
+}
+
+// ───────────────────────── F6: 정책 기반 회수 제안 ─────────────────────────
+
+#[derive(uniffi::Record)]
+pub struct SuggestionItemInfo {
+    pub path: String,
+    pub title: String,
+    /// "rule" | "category"
+    pub source: String,
+    pub safety: String,
+    pub estimated: u64,
+    pub recreate_command: String,
+    pub idle_days: Option<u64>,
+}
+
+#[derive(uniffi::Record)]
+pub struct SuggestionInfo {
+    pub generated_at: u64,
+    pub total_estimated: u64,
+    pub below_threshold: bool,
+    pub items: Vec<SuggestionItemInfo>,
+}
+
+#[uniffi::export]
+impl ScanHandle {
+    /// 정책 기반 회수 제안 — CLI --suggest와 동일한 단일 정책
+    /// (space_rules::suggest). 블로킹(룰 경로 측정 + git 조회) —
+    /// 백그라운드에서 호출. 홈은 $HOME 기준.
+    pub fn suggestions(&self, idle_days: u64, min_bytes: u64) -> SuggestionInfo {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let root = self.root.read().unwrap();
+        let s = space_rules::suggest::build(&root, &self.root_path, &home, idle_days, min_bytes);
+        SuggestionInfo {
+            generated_at: s.generated_at,
+            total_estimated: s.total_estimated,
+            below_threshold: s.below_threshold,
+            items: s
+                .items
+                .into_iter()
+                .map(|i| SuggestionItemInfo {
+                    path: i.path.to_string_lossy().into_owned(),
+                    title: i.title,
+                    source: i.source,
+                    safety: i.safety,
+                    estimated: i.estimated,
+                    recreate_command: i.recreate_command,
+                    idle_days: i.idle_days,
+                })
+                .collect(),
         }
     }
 }

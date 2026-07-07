@@ -140,6 +140,10 @@ final class BackgroundAgent: ObservableObject {
     private var unsavedDeltaBytes: Int64 = 0
     private let saveInterval: TimeInterval = 15 * 60
     private let saveDeltaThreshold: Int64 = 1 << 30  // 1 GiB
+    /// 증분만 계속 돌면 서브트리 밖과 걸친 하드링크 접힘·newest_mtime 감소가
+    /// 영영 회복되지 않는다 — 주기적으로 전체 스캔을 강제해 전역 정확도를 되찾는다.
+    private var lastFullScanAt: Date?
+    private let fullRescanInterval: TimeInterval = 6 * 3600
 
     private func startLiveWatch(root: String, budgetGiB: Double) {
         watchRoot = root
@@ -150,6 +154,7 @@ final class BackgroundAgent: ObservableObject {
         watchGeneration += 1
         lastSavedAt = nil
         unsavedDeltaBytes = 0
+        lastFullScanAt = nil
 
         var context = FSEventStreamContext(
             version: 0,
@@ -249,7 +254,12 @@ final class BackgroundAgent: ObservableObject {
         let root = watchRoot
         let generation = watchGeneration
         let changed = Array(pendingPaths)
-        var incremental = liveHandle != nil && !mustFullRescan && !changed.isEmpty
+        // 6시간마다 전체 스캔을 강제 — 증분의 하드링크/최신 mtime 부정확이
+        // "다음 전체 스캔에서 회복"이라는 약속을 실제로 지키게 한다.
+        let fullScanDue =
+            lastFullScanAt.map { Date().timeIntervalSince($0) > fullRescanInterval } ?? true
+        var incremental =
+            liveHandle != nil && !mustFullRescan && !changed.isEmpty && !fullScanDue
         pendingPaths = []
         mustFullRescan = false
 
@@ -291,6 +301,7 @@ final class BackgroundAgent: ObservableObject {
             if handle != nil {
                 lastSavedAt = Date()
                 unsavedDeltaBytes = 0
+                lastFullScanAt = Date()
             }
         }
         isRecomputing = false

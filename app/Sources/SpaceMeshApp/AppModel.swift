@@ -117,6 +117,18 @@ final class AppModel: ObservableObject {
     }
 }
 
+/// unix 초 → 사람 눈에 맞춘 나이 문자열. 0 = 미상. (앱 공용 나이 포매터)
+func humanAge(_ mtime: Int64) -> String {
+    guard mtime > 0 else { return "—" }
+    let days = (Date().timeIntervalSince1970 - Double(mtime)) / 86_400
+    switch days {
+    case ..<1: return "오늘"
+    case ..<30: return "\(Int(days))일 전"
+    case ..<365: return "\(Int(days / 30))개월 전"
+    default: return String(format: "%.1f년 전", days / 365)
+    }
+}
+
 func humanBytes(_ bytes: UInt64) -> String {
     let units = ["B", "KiB", "MiB", "GiB", "TiB"]
     var value = Double(bytes)

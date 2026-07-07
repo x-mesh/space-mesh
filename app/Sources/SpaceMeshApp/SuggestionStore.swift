@@ -29,7 +29,6 @@ struct Suggestion: Codable {
     let root: String
     let idleDays: UInt64
     let totalEstimated: UInt64
-    let belowThreshold: Bool
     let items: [SuggestionItem]
 
     enum CodingKeys: String, CodingKey {
@@ -37,7 +36,6 @@ struct Suggestion: Codable {
         case generatedAt = "generated_at"
         case idleDays = "idle_days"
         case totalEstimated = "total_estimated"
-        case belowThreshold = "below_threshold"
     }
 }
 
@@ -69,7 +67,9 @@ final class SuggestionStore: ObservableObject {
     }
 
     /// 스캔 핸들로 in-process 평가 — live 모드 재집계 후/수동 스캔 후 호출.
-    /// 룰 경로 측정이 가벼운 스캔을 동반하므로 6시간에 한 번만 실제 평가한다.
+    /// 정책은 코어(space_rules::suggest) 단일 구현을 FFI로 호출한다 — CLI
+    /// --suggest(주기 모드)와 항상 같은 제안을 낸다. 룰 경로 측정이 가벼운
+    /// 스캔을 동반하므로 6시간에 한 번만 실제 평가한다.
     func evaluate(handle: ScanHandle, root: String, settings: AppSettings) async -> Suggestion? {
         guard settings.suggestEnabled else { return nil }
         if let last = lastEvalAt, Date().timeIntervalSince(last) < 6 * 3600 {
@@ -79,37 +79,23 @@ final class SuggestionStore: ObservableObject {
 
         let idleDays = UInt64(max(0, settings.suggestIdleDays))
         let minBytes = UInt64(max(0, settings.suggestMinGiB) * 1_073_741_824)
-        let (candidates, hits) = await Task.detached(priority: .utility) {
-            (detectCleanup(home: NSHomeDirectory()), handle.categories())
+        let info = await Task.detached(priority: .utility) {
+            handle.suggestions(idleDays: idleDays, minBytes: minBytes)
         }.value
-
-        var items: [SuggestionItem] = []
-        for c in candidates where c.safety == "safe" {
-            items.append(
-                SuggestionItem(
-                    path: c.path, title: c.title, source: "rule", safety: c.safety,
-                    estimated: c.allocatedSize, recreateCommand: c.recreateCommand,
-                    idleDays: nil))
-        }
-        // 유휴 판정이 불가능한(git 없는) 프로젝트는 보수적으로 제외.
-        for h in hits where h.verified && h.safety == "safe" && (h.idleDays ?? 0) >= idleDays {
-            items.append(
-                SuggestionItem(
-                    path: h.path, title: h.title, source: "category", safety: h.safety,
-                    estimated: h.allocatedSize, recreateCommand: h.recreateCommand,
-                    idleDays: h.idleDays))
-        }
-        let total = items.reduce(UInt64(0)) { $0 + $1.estimated }
-        guard total >= minBytes, !items.isEmpty else { return nil }
+        guard !info.belowThreshold, !info.items.isEmpty else { return nil }
 
         let suggestion = Suggestion(
             version: 1,
-            generatedAt: UInt64(Date().timeIntervalSince1970),
+            generatedAt: info.generatedAt,
             root: root,
             idleDays: idleDays,
-            totalEstimated: total,
-            belowThreshold: false,
-            items: items)
+            totalEstimated: info.totalEstimated,
+            items: info.items.map {
+                SuggestionItem(
+                    path: $0.path, title: $0.title, source: $0.source, safety: $0.safety,
+                    estimated: $0.estimated, recreateCommand: $0.recreateCommand,
+                    idleDays: $0.idleDays)
+            })
         current = suggestion
         dismissed = false
         return suggestion

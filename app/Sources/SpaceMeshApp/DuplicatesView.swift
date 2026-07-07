@@ -63,12 +63,9 @@ struct DuplicatesView: View {
                 onUndo: { model.undoLastBatch() },
                 onRefresh: { model.findDups(root: root, minMib: minMib) },
                 onAddToPlan: {
-                    // 중복은 사용자 데이터 — 사본이 남더라도 warn으로 담아 실행 시트에서 재확인.
                     plan.add(
                         selectedItems.map {
-                            PlanItem(
-                                path: $0.path, estimatedBytes: $0.size,
-                                source: .duplicate, safety: "warn", recreateCommand: "")
+                            PlanItem(duplicatePath: $0.path, estimated: $0.size)
                         })
                     model.selectedDupPaths = []
                 }
