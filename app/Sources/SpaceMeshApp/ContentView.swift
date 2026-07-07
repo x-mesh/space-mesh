@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var fdaBannerDismissed = false
     @State private var oldFilesOnly = false
     @StateObject private var volume = VolumeStatus()
+    @ObservedObject private var suggestions = SuggestionStore.shared
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,6 +30,10 @@ struct ContentView: View {
             Rectangle().fill(Theme.border).frame(height: 1)
             if showFdaBanner {
                 fdaBanner
+                Rectangle().fill(Theme.border).frame(height: 1)
+            }
+            if let suggestion = suggestions.current, !suggestions.dismissed {
+                suggestionBanner(suggestion)
                 Rectangle().fill(Theme.border).frame(height: 1)
             }
             switch mode {
@@ -55,8 +60,52 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
         .quickLookPreview($previewURL)
-        .onAppear { volume.refresh(path: scanTarget) }
+        .onAppear {
+            volume.refresh(path: scanTarget)
+            // 주기 모드 CLI가 남긴 회수 제안이 있으면 배너로 (F6).
+            suggestions.loadFromDisk()
+        }
         .onChange(of: model.scanSeconds) { volume.refresh(path: scanTarget) }
+    }
+
+    // MARK: - 회수 제안 배너 (F6)
+
+    private func suggestionBanner(_ suggestion: Suggestion) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.accent)
+            Text(
+                "회수 제안: \(suggestion.items.count)개 항목 · \(humanBytes(suggestion.totalEstimated)) — safe 캐시와 \(suggestion.idleDays)일+ 유휴 프로젝트 산출물"
+            )
+            .font(.system(size: 11.5))
+            .foregroundStyle(Theme.textDim)
+            Spacer()
+            Button("플랜에 담기") {
+                plan.add(
+                    suggestion.items.map {
+                        PlanItem(
+                            path: $0.path, estimatedBytes: $0.estimated,
+                            source: $0.source == "category" ? .category : .rule,
+                            safety: $0.safety, recreateCommand: $0.recreateCommand)
+                    })
+                suggestions.dismissed = true
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.accent)
+            Button {
+                suggestions.dismissed = true
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Theme.textFaint)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Theme.panel)
     }
 
     /// 사이드바 대용량 파일 — 나이 필터 적용분 (F5).

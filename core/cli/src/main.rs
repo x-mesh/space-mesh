@@ -45,6 +45,34 @@ struct Args {
     /// diff에서 보고할 최소 변화량 (MiB)
     #[arg(long, default_value_t = 10)]
     min_delta_mib: u64,
+
+    /// 내장 룰셋으로 홈 디렉토리의 정리 후보를 탐지 (스캔 안 함)
+    #[arg(long)]
+    detect: bool,
+
+    /// path 아래 중복 파일 그룹 탐지 (--min-file-mib 이상)
+    #[arg(long)]
+    dups: bool,
+
+    /// 설치된 도구의 공식 정리 커맨드 제안 (dry-run 예상치 포함, 스캔 안 함)
+    #[arg(long)]
+    advise: bool,
+
+    /// 스캔 후 정책 기반 회수 제안 생성: safe 룰 후보 + 유휴 프로젝트의 safe 빌드 산출물
+    #[arg(long)]
+    suggest: bool,
+
+    /// --suggest 결과 JSON을 쓸 파일 (생략 시 stdout으로 출력하고 종료)
+    #[arg(long, requires = "suggest")]
+    suggest_out: Option<PathBuf>,
+
+    /// --suggest: git 마지막 커밋이 이 일수 이상인 프로젝트의 산출물만
+    #[arg(long, default_value_t = 90)]
+    idle_days: u64,
+
+    /// --suggest: 제안 합계가 이 값(MiB) 미만이면 항목을 비운다 (소음 방지)
+    #[arg(long, default_value_t = 512)]
+    suggest_min_mib: u64,
 }
 
 fn main() {
@@ -60,6 +88,18 @@ fn main() {
 
     if args.diff {
         run_diff(&args);
+        return;
+    }
+    if args.detect {
+        run_detect(&args);
+        return;
+    }
+    if args.dups {
+        run_dups(&args);
+        return;
+    }
+    if args.advise {
+        run_advise(&args);
         return;
     }
 
@@ -122,6 +162,23 @@ fn main() {
     };
     let elapsed = started.elapsed();
 
+    // 정책 기반 회수 제안 (F6/F8) — 방금 스캔한 트리를 재사용한다.
+    if args.suggest {
+        let payload = build_suggestions(&args, &root);
+        match &args.suggest_out {
+            Some(out) => {
+                match std::fs::write(out, serde_json::to_string_pretty(&payload).unwrap()) {
+                    Ok(()) => eprintln!("suggestions written to {}", out.display()),
+                    Err(e) => eprintln!("warning: suggest write failed: {}", e),
+                }
+            }
+            None => {
+                println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+                return;
+            }
+        }
+    }
+
     if args.json {
         truncate_depth(&mut root, args.depth);
         let out = serde_json::json!({
@@ -162,6 +219,169 @@ fn main() {
             println!("  {:>10}  {}", human(f.allocated_size), f.path.display());
         }
     }
+}
+
+fn home_dir(args: &Args) -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| args.path.clone())
+}
+
+/// 내장 룰셋으로 홈의 정리 후보 탐지 (F8). --json 스키마는 FFI Record와 필드명 일치.
+fn run_detect(args: &Args) {
+    let candidates = space_rules::detect(&home_dir(args));
+    if args.json {
+        let out = serde_json::json!({
+            "candidates": candidates.iter().map(|c| serde_json::json!({
+                "rule_id": c.rule.id,
+                "title": c.rule.title,
+                "category": c.rule.category,
+                "safety": c.rule.safety,
+                "path": c.resolved_path,
+                "allocated_size": c.allocated_size,
+                "file_count": c.file_count,
+                "recreate_command": c.rule.recreate_command,
+                "recreate_cost": c.rule.recreate_cost,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return;
+    }
+    println!("Cleanup candidates ({}):", candidates.len());
+    for c in &candidates {
+        println!(
+            "  {:>10}  [{}] {}  ({})",
+            human(c.allocated_size),
+            c.rule.safety,
+            c.rule.title,
+            c.resolved_path.display()
+        );
+    }
+}
+
+/// path 아래 중복 파일 그룹 (F8). 클론 공유 보정 포함.
+fn run_dups(args: &Args) {
+    let result =
+        space_dedup::find_duplicates(&args.path, args.min_file_mib.max(1) * 1024 * 1024, None)
+            .unwrap_or_else(|e| {
+                eprintln!("error: dups: {}", e);
+                std::process::exit(1);
+            });
+    if args.json {
+        let out = serde_json::json!({
+            "groups": result.groups.iter().map(|g| serde_json::json!({
+                "file_size": g.file_size,
+                "reclaimable": g.reclaimable,
+                "clone_shared": g.clone_shared,
+                "hash_hex": g.hash_hex,
+                "files": g.files,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return;
+    }
+    println!("Duplicate groups ({}):", result.groups.len());
+    for g in &result.groups {
+        println!(
+            "  {} × {:>10}  reclaimable {}{}",
+            g.files.len(),
+            human(g.file_size),
+            human(g.reclaimable),
+            if g.clone_shared {
+                "  (clone-shared)"
+            } else {
+                ""
+            }
+        );
+        for f in &g.files {
+            println!("      {}", f.display());
+        }
+    }
+}
+
+/// 설치된 도구의 공식 정리 커맨드 제안 (F8).
+fn run_advise(args: &Args) {
+    let advices = space_rules::advisor::advise();
+    if args.json {
+        let out = serde_json::json!({
+            "advices": advices.iter().map(|a| serde_json::json!({
+                "tool": a.tool,
+                "command": a.command,
+                "description": a.description,
+                "estimated_reclaim": a.estimated_reclaim,
+                "available": a.available,
+                "detail": a.detail,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return;
+    }
+    for a in &advices {
+        println!(
+            "  {}{}  {}  — {}",
+            a.tool,
+            if a.available { "" } else { " (없음)" },
+            a.command,
+            a.estimated_reclaim.map(human).unwrap_or_default()
+        );
+    }
+}
+
+/// 정책 평가 (F6): safe 룰 후보 전부 + 유휴 프로젝트의 verified safe 빌드 산출물.
+/// 합계가 suggest_min_mib 미만이면 항목을 비워 소음을 막는다 (below_threshold로 표시).
+fn build_suggestions(args: &Args, root: &DirNode) -> serde_json::Value {
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut total: u64 = 0;
+
+    for c in space_rules::detect(&home_dir(args)) {
+        if c.rule.safety != "safe" {
+            continue;
+        }
+        total += c.allocated_size;
+        items.push(serde_json::json!({
+            "path": c.resolved_path,
+            "title": c.rule.title,
+            "source": "rule",
+            "safety": c.rule.safety,
+            "estimated": c.allocated_size,
+            "recreate_command": c.rule.recreate_command,
+            "idle_days": serde_json::Value::Null,
+        }));
+    }
+
+    let hits = space_rules::categories::find_categories(root, &args.path);
+    let idle = space_rules::categories::annotate_idle(&hits);
+    for h in &hits {
+        let days = idle.get(&h.project_path).copied();
+        if !h.verified || h.def.safety != "safe" || days.unwrap_or(0) < args.idle_days {
+            continue;
+        }
+        total += h.allocated_size;
+        items.push(serde_json::json!({
+            "path": h.path,
+            "title": h.def.title,
+            "source": "category",
+            "safety": h.def.safety,
+            "estimated": h.allocated_size,
+            "recreate_command": h.def.recreate_command,
+            "idle_days": days,
+        }));
+    }
+
+    let below = total < args.suggest_min_mib * 1024 * 1024;
+    let generated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    serde_json::json!({
+        "version": 1,
+        "generated_at": generated_at,
+        "root": args.path,
+        "idle_days": args.idle_days,
+        "total_estimated": total,
+        "below_threshold": below,
+        "items": if below { Vec::new() } else { items },
+    })
 }
 
 /// 최근 두 스냅샷 비교 — 변화의 범인 출력.

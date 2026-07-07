@@ -74,11 +74,30 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(budgetGiB, forKey: "budgetGiB") }
     }
 
+    // MARK: - 회수 제안 정책 (F6) — 계산·알림까지만, 자동 삭제 없음.
+
+    /// 백그라운드가 회수 후보를 계산해 제안할지.
+    @Published var suggestEnabled: Bool {
+        didSet { defaults.set(suggestEnabled, forKey: "suggestEnabled") }
+    }
+    /// 이 일수 이상 유휴(git 마지막 커밋 기준)인 프로젝트의 산출물만 제안.
+    @Published var suggestIdleDays: Int {
+        didSet { defaults.set(suggestIdleDays, forKey: "suggestIdleDays") }
+    }
+    /// 제안 합계가 이 값(GiB) 미만이면 알리지 않는다 (소음 방지).
+    @Published var suggestMinGiB: Double {
+        didSet { defaults.set(suggestMinGiB, forKey: "suggestMinGiB") }
+    }
+
     private init() {
         mode = WatchMode(rawValue: defaults.string(forKey: "watchMode") ?? "") ?? .off
         interval =
             PeriodicInterval(rawValue: defaults.string(forKey: "periodicInterval") ?? "") ?? .daily
         watchedRoot = defaults.string(forKey: "watchedRoot") ?? NSHomeDirectory()
         budgetGiB = defaults.double(forKey: "budgetGiB")
+        suggestEnabled =
+            defaults.object(forKey: "suggestEnabled") as? Bool ?? true
+        suggestIdleDays = defaults.object(forKey: "suggestIdleDays") as? Int ?? 90
+        suggestMinGiB = defaults.object(forKey: "suggestMinGiB") as? Double ?? 0.5
     }
 }

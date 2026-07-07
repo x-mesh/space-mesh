@@ -785,7 +785,9 @@ dependencies = [
  "clap",
  "libc",
  "serde_json",
+ "space-dedup",
  "space-index",
+ "space-rules",
  "space-scanner",
 ]
 

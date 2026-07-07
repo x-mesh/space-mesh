@@ -53,6 +53,7 @@ enum SelfTest {
             failures.append(contentsOf: testReclaimLog())
             failures.append(contentsOf: testPlanMerge())
             failures.append(contentsOf: testCloneMerge())
+            failures.append(contentsOf: testSuggestSchema())
             if failures.isEmpty {
                 print("SELFTEST OK — files=\(stats.totalFiles) dirs=\(stats.totalDirs) root=\(root.allocatedSize)B + cleanup/dedup/trash-undo")
                 exit(0)
@@ -381,6 +382,43 @@ enum SelfTest {
             return failures
         } catch {
             return ["clone: \(error)"]
+        }
+    }
+
+    /// CLI --suggest 산출물을 앱의 Suggestion Codable로 디코드 — 스키마 계약 검증 (F6/F8).
+    private static func testSuggestSchema() -> [String] {
+        guard let cli = BackgroundAgent.cliPath() else { return [] }  // testCliPath가 이미 보고
+        let fm = FileManager.default
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let tmp = fm.temporaryDirectory.appendingPathComponent("space-mesh-suggest-\(pid)")
+        let out = fm.temporaryDirectory.appendingPathComponent("space-mesh-suggest-\(pid).json")
+        defer {
+            try? fm.removeItem(at: tmp)
+            try? fm.removeItem(at: out)
+        }
+        do {
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            try Data(repeating: 1, count: 10_000).write(to: tmp.appendingPathComponent("f.bin"))
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: cli)
+            proc.arguments = [
+                tmp.path, "--suggest", "--suggest-out", out.path,
+                "--idle-days", "0", "--suggest-min-mib", "0",
+            ]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            try proc.run()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else {
+                return ["suggest: CLI 종료코드 \(proc.terminationStatus)"]
+            }
+            let data = try Data(contentsOf: out)
+            let decoded = try JSONDecoder().decode(Suggestion.self, from: data)
+            if decoded.version != 1 { return ["suggest: version=\(decoded.version)"] }
+            if decoded.generatedAt == 0 { return ["suggest: generated_at=0"] }
+            return []
+        } catch {
+            return ["suggest: \(error)"]
         }
     }
 

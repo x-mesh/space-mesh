@@ -34,7 +34,7 @@ final class BackgroundAgent: ObservableObject {
         case .off:
             status = "감시 꺼짐"
         case .periodic:
-            installLaunchAgent(root: settings.watchedRoot, interval: settings.interval)
+            installLaunchAgent(settings)
         case .live:
             requestNotificationAuth()
             startLiveWatch(root: settings.watchedRoot, budgetGiB: settings.budgetGiB)
@@ -61,14 +61,26 @@ final class BackgroundAgent: ObservableObject {
         return FileManager.default.isExecutableFile(atPath: devPath.path) ? devPath.path : nil
     }
 
-    private func installLaunchAgent(root: String, interval: PeriodicInterval) {
+    private func installLaunchAgent(_ settings: AppSettings) {
+        let root = settings.watchedRoot
+        let interval = settings.interval
         guard let cli = Self.cliPath() else {
             status = "CLI 바이너리를 찾을 수 없어 주기 모드를 설정하지 못했습니다"
             return
         }
+        var arguments = [cli, root, "--db", AppModel.dbPath, "--depth", "0"]
+        if settings.suggestEnabled {
+            // 스냅샷과 함께 회수 제안도 계산해 파일로 남긴다 — 앱이 열릴 때 배너로 표시 (F6).
+            arguments += [
+                "--suggest",
+                "--suggest-out", SuggestionStore.filePath,
+                "--idle-days", "\(max(0, settings.suggestIdleDays))",
+                "--suggest-min-mib", "\(Int(max(0, settings.suggestMinGiB) * 1024))",
+            ]
+        }
         let plist: [String: Any] = [
             "Label": launchAgentLabel,
-            "ProgramArguments": [cli, root, "--db", AppModel.dbPath, "--depth", "0"],
+            "ProgramArguments": arguments,
             "StartInterval": interval.seconds,
             "ProcessType": "Background",  // 저우선순위 스케줄링
             "LowPriorityIO": true,  // 다른 IO를 방해하지 않음
@@ -260,6 +272,16 @@ final class BackgroundAgent: ObservableObject {
 
         if budgetBytes > 0 && total > budgetBytes {
             notifyBudget(total: total, budget: budgetBytes, root: root)
+        }
+
+        // 정책 기반 회수 제안 (F6) — 평가는 6시간 스로틀, 알림은 24시간 중복 방지.
+        let settings = AppSettings.shared
+        if settings.suggestEnabled {
+            if let suggestion = await SuggestionStore.shared.evaluate(
+                handle: handle, root: root, settings: settings)
+            {
+                SuggestionStore.shared.notifyIfNew(suggestion)
+            }
         }
     }
 
