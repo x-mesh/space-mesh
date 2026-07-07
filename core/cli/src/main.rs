@@ -105,6 +105,12 @@ fn main() {
                 Ok(id) => eprintln!("snapshot #{} saved to {}", id, db_path.display()),
                 Err(e) => eprintln!("warning: snapshot save failed: {}", e),
             }
+            // 보존 정책 (F7): 7일 전체 → 30일 일별 → 이후 주별. 주기 모드 무한 축적 방지.
+            if let Ok(pruned) = space_index::prune_snapshots(&mut conn) {
+                if pruned > 0 {
+                    eprintln!("pruned {} old snapshot(s)", pruned);
+                }
+            }
         }
         (
             result.root,

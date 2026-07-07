@@ -165,7 +165,30 @@ struct DuplicatesView: View {
                         InstrumentLabel(text: "회수 가능")
                         Text(humanBytes(group.reclaimable))
                             .font(.dataCell)
-                            .foregroundStyle(Theme.accent)
+                            .foregroundStyle(group.reclaimable == 0 ? Theme.textFaint : Theme.accent)
+                        if group.cloneShared {
+                            TagBadge(text: "일부 클론 — 회수 보정됨", color: Theme.info)
+                                .help("이미 APFS 클론으로 블록을 공유하는 파일이 있어, 지워도 그만큼은 공간이 늘지 않습니다")
+                        }
+                        Spacer()
+                        if group.reclaimable > 0 {
+                            Button {
+                                model.mergeGroupAsClones(group) {
+                                    model.findDups(root: root, minMib: minMib)
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.triangle.merge")
+                                        .font(.system(size: 9, weight: .bold))
+                                    Text("클론으로 병합 (무손실)")
+                                        .font(.system(size: 10.5, weight: .semibold))
+                                }
+                                .foregroundStyle(model.isMerging ? Theme.textFaint : Theme.safe)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(model.isMerging)
+                            .help("첫 파일만 실블록을 갖고 나머지를 APFS 클론 사본으로 교체합니다 — 모든 파일이 그대로 남고 공간만 회수됩니다")
+                        }
                     }
                     .textCase(nil)
                 }

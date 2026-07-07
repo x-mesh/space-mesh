@@ -275,6 +275,11 @@ struct ReclaimTrayView: View {
                 Text(measured >= 0 ? humanBytes(UInt64(measured)) : "-\(humanBytes(UInt64(-measured)))")
                     .font(.dataCell)
                     .foregroundStyle(deviates(report) ? Theme.warn : Theme.safe)
+                    .help(
+                        deviates(report)
+                            ? "예상과의 차이는 대개 APFS 로컬 스냅샷·휴지통 보류분(purgeable) 때문입니다 — 툴바의 PURGEABLE 게이지를 확인하세요"
+                            : "실행 직후 영향받은 디렉토리만 다시 스캔해 측정한 값입니다"
+                    )
             } else {
                 InstrumentLabel(text: "실측 불가")
             }

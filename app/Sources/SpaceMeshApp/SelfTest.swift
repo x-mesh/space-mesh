@@ -38,6 +38,9 @@ enum SelfTest {
                 failures.append("bigFiles mismatch: \(big.map(\.path))")
             }
             if !subPath.hasSuffix("/sub") { failures.append("fullPath mismatch: \(subPath)") }
+            // F5: 나이 축 — 방금 만든 픽스처는 mtime이 현재에 가깝다.
+            if root.newestMtime <= 0 { failures.append("newestMtime=\(root.newestMtime) <= 0") }
+            if big[0].mtime <= 0 { failures.append("bigFile mtime=\(big[0].mtime) <= 0") }
 
             try? FileManager.default.removeItem(at: tmp)
             failures.append(contentsOf: testCleanupDetection())
@@ -49,6 +52,7 @@ enum SelfTest {
             failures.append(contentsOf: testRefreshPaths())
             failures.append(contentsOf: testReclaimLog())
             failures.append(contentsOf: testPlanMerge())
+            failures.append(contentsOf: testCloneMerge())
             if failures.isEmpty {
                 print("SELFTEST OK — files=\(stats.totalFiles) dirs=\(stats.totalDirs) root=\(root.allocatedSize)B + cleanup/dedup/trash-undo")
                 exit(0)
@@ -332,6 +336,52 @@ enum SelfTest {
             failures.append("plan: 중복/합계 오류 (count=\(plan.items.count), total=\(plan.totalEstimated))")
         }
         return failures
+    }
+
+    /// mergeDuplicates — 내용 다른 파일은 거부, 동일 파일은 병합 후 내용 보존 (F3).
+    private static func testCloneMerge() -> [String] {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory
+            .appendingPathComponent("space-mesh-clone-\(ProcessInfo.processInfo.processIdentifier)")
+        defer { try? fm.removeItem(at: tmp) }
+        do {
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            let content = Data(repeating: 7, count: 100_000)
+            try content.write(to: tmp.appendingPathComponent("keep.bin"))
+            try content.write(to: tmp.appendingPathComponent("victim.bin"))
+            try Data(repeating: 9, count: 100_000).write(to: tmp.appendingPathComponent("other.bin"))
+
+            var failures: [String] = []
+            // 내용이 다른 파일은 어떤 경우에도 병합 거부 — 데이터 손실 방지의 핵심.
+            let bad = mergeDuplicates(
+                keep: tmp.appendingPathComponent("keep.bin").path,
+                victims: [tmp.appendingPathComponent("other.bin").path])
+            if bad.merged != 0 { failures.append("clone: 다른 내용이 병합됨") }
+            if try Data(contentsOf: tmp.appendingPathComponent("other.bin"))
+                != Data(repeating: 9, count: 100_000)
+            {
+                failures.append("clone: 거부 후 원본 손상")
+            }
+
+            // 동일 파일 병합 — APFS(macOS 기본)면 성공하고 내용이 보존돼야 한다.
+            let good = mergeDuplicates(
+                keep: tmp.appendingPathComponent("keep.bin").path,
+                victims: [tmp.appendingPathComponent("victim.bin").path])
+            if good.merged == 1 {
+                if try Data(contentsOf: tmp.appendingPathComponent("victim.bin")) != content {
+                    failures.append("clone: 병합 후 내용 불일치")
+                }
+            }
+            // 비-APFS 임시 볼륨이면 failed=1도 허용 (victim 무손상만 확인).
+            if good.merged == 0,
+                try Data(contentsOf: tmp.appendingPathComponent("victim.bin")) != content
+            {
+                failures.append("clone: 병합 실패 시 victim 손상")
+            }
+            return failures
+        } catch {
+            return ["clone: \(error)"]
+        }
     }
 
     /// 휴지통 이동 + 복원 + 안전 가드.

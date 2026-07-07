@@ -45,6 +45,8 @@ pub struct NodeInfo {
     pub file_count: u64,
     pub dir_count: u64,
     pub child_count: u32,
+    /// 서브트리 최신 파일 mtime (unix 초). 0 = 미상 (나이 오버레이용, F5).
+    pub newest_mtime: i64,
 }
 
 #[derive(uniffi::Record)]
@@ -52,6 +54,8 @@ pub struct BigFile {
     pub path: String,
     pub logical_size: u64,
     pub allocated_size: u64,
+    /// 파일 mtime (unix 초). 0 = 미상.
+    pub mtime: i64,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -92,6 +96,7 @@ fn to_info(index: u32, node: &DirNode) -> NodeInfo {
         file_count: node.file_count,
         dir_count: node.dir_count,
         child_count: node.children.len() as u32,
+        newest_mtime: node.newest_mtime,
     }
 }
 
@@ -129,6 +134,7 @@ impl ScanHandle {
                 path: f.path.to_string_lossy().into_owned(),
                 logical_size: f.logical_size,
                 allocated_size: f.allocated_size,
+                mtime: f.mtime,
             })
             .collect();
         files.sort_by(|a, b| b.allocated_size.cmp(&a.allocated_size));
@@ -144,6 +150,7 @@ impl ScanHandle {
                 path: f.path.to_string_lossy().into_owned(),
                 logical_size: f.logical_size,
                 allocated_size: f.allocated_size,
+                mtime: f.mtime,
             })
             .collect()
     }
@@ -262,14 +269,17 @@ impl ScanHandle {
             .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
         let root = self.root.read().unwrap();
         let stats = self.stats.read().unwrap().clone();
-        space_index::save_tree(
+        let id = space_index::save_tree(
             &mut conn,
             &self.root_path,
             &root,
             stats.total_files,
             stats.total_dirs,
         )
-        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+        // 보존 정책 적용 (F7) — 방금 저장분은 항상 "최근 7일"에 들어 안전.
+        let _ = space_index::prune_snapshots(&mut conn);
+        Ok(id)
     }
 }
 
@@ -337,6 +347,8 @@ pub fn scan_and_save(
         .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
     space_index::save_snapshot(&mut conn, &root_path, &result)
         .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    // 보존 정책 적용 (F7) — 실패해도 스캔 결과에는 영향 없음.
+    let _ = space_index::prune_snapshots(&mut conn);
     Ok(Arc::new(ScanHandle {
         root_path,
         stats: RwLock::new(ScanStatsInfo {
@@ -389,7 +401,10 @@ pub fn detect_cleanup(home: String) -> Vec<CleanupCandidate> {
 #[derive(uniffi::Record)]
 pub struct DupGroupInfo {
     pub file_size: u64,
+    /// 클론 공유 블록 보정 후 회수 가능량.
     pub reclaimable: u64,
+    /// true = 이미 APFS 클론으로 블록을 공유하는 파일이 있다 (지워도 회수 0).
+    pub clone_shared: bool,
     pub hash_hex: String,
     pub files: Vec<String>,
 }
@@ -410,6 +425,7 @@ pub fn find_duplicates(root: String, min_size_mib: u64) -> Result<Vec<DupGroupIn
         .map(|g| DupGroupInfo {
             file_size: g.file_size,
             reclaimable: g.reclaimable,
+            clone_shared: g.clone_shared,
             hash_hex: g.hash_hex,
             files: g
                 .files
@@ -418,6 +434,40 @@ pub fn find_duplicates(root: String, min_size_mib: u64) -> Result<Vec<DupGroupIn
                 .collect(),
         })
         .collect())
+}
+
+/// 중복 그룹 병합 결과 (F3).
+#[derive(uniffi::Record)]
+pub struct MergeResult {
+    pub merged: u32,
+    pub failed: u32,
+    /// 회수 추정치 상한 (victim들이 점유하던 블록 합).
+    pub reclaimed: u64,
+}
+
+/// victim들을 keep의 APFS 클론 사본으로 교체한다 — 데이터 손실 없는 회수.
+/// 각 victim은 교체 직전 재해시로 동일성을 재확인하며, 실패한 항목은 무손상으로
+/// 남는다. 블로킹(해시 IO) — 백그라운드에서 호출.
+#[uniffi::export]
+pub fn merge_duplicates(keep: String, victims: Vec<String>) -> MergeResult {
+    let keep = PathBuf::from(keep);
+    let mut merged = 0u32;
+    let mut failed = 0u32;
+    let mut reclaimed = 0u64;
+    for victim in victims {
+        match space_dedup::merge_as_clone(&keep, Path::new(&victim)) {
+            Ok(bytes) => {
+                merged += 1;
+                reclaimed += bytes;
+            }
+            Err(_) => failed += 1,
+        }
+    }
+    MergeResult {
+        merged,
+        failed,
+        reclaimed,
+    }
 }
 
 // ───────────────────────── 카테고리 뷰 (스캔 트리 재사용) ─────────────────────────

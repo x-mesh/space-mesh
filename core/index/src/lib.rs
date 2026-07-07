@@ -55,7 +55,7 @@ pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
 }
 
 /// 스키마 버전. PRAGMA user_version으로 추적한다 (0 = Phase 1 초기 스키마).
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// user_version 기반 순차 마이그레이션. 각 단계는 멱등적이지 않아도 되지만
 /// (버전 검사로 1회만 실행) 실패 시 버전을 올리지 않아 다음 open에서 재시도된다.
@@ -75,6 +75,15 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             );",
         )?;
         version = 1;
+        conn.pragma_update(None, "user_version", version)?;
+    }
+    if version < 2 {
+        // v2: 나이 축 (F5). 구버전 스냅샷은 0 = 나이 미상으로 로드된다.
+        conn.execute_batch(
+            "ALTER TABLE nodes ADD COLUMN newest_mtime INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE big_files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        version = 2;
         conn.pragma_update(None, "user_version", version)?;
     }
     debug_assert_eq!(version, SCHEMA_VERSION);
@@ -157,6 +166,55 @@ pub fn reclaim_log_list(
     rows.collect()
 }
 
+// ───────────────────────── 스냅샷 보존 정책 (F7) ─────────────────────────
+
+/// 오래된 스냅샷을 씨닝한다: 최근 7일 전부 → 8~30일 루트·일별 최신 1개 →
+/// 이후 루트·주별 최신 1개. 반환: 삭제한 스냅샷 수.
+///
+/// 주기 모드(시간당 1개)가 무한 축적되는 것을 막는다. 저장 직후 호출해도
+/// 방금 저장한 스냅샷은 "최근 7일"에 항상 포함되므로 안전하다.
+pub fn prune_snapshots(conn: &mut Connection) -> rusqlite::Result<u64> {
+    let tx = conn.transaction()?;
+    let deleted = tx.execute(
+        "DELETE FROM scans WHERE id NOT IN (
+            SELECT id FROM scans
+              WHERE julianday('now') - julianday(created_at) <= 7
+            UNION
+            SELECT MAX(id) FROM scans
+              WHERE julianday('now') - julianday(created_at) > 7
+                AND julianday('now') - julianday(created_at) <= 30
+              GROUP BY root_path, date(created_at)
+            UNION
+            SELECT MAX(id) FROM scans
+              WHERE julianday('now') - julianday(created_at) > 30
+              GROUP BY root_path, strftime('%Y-%W', created_at)
+        )",
+        [],
+    )? as u64;
+    if deleted > 0 {
+        // ON DELETE CASCADE는 PRAGMA foreign_keys(기본 OFF)에 의존하므로 수동 정리.
+        tx.execute(
+            "DELETE FROM nodes WHERE scan_id NOT IN (SELECT id FROM scans)",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM big_files WHERE scan_id NOT IN (SELECT id FROM scans)",
+            [],
+        )?;
+    }
+    tx.commit()?;
+
+    if deleted > 0 {
+        // 빈 페이지가 전체의 1/4을 넘을 때만 VACUUM (풀 리라이트라 비싸다).
+        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let freelist: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        if page_count > 0 && freelist * 4 > page_count {
+            conn.execute_batch("VACUUM;")?;
+        }
+    }
+    Ok(deleted)
+}
+
 /// 스캔 결과 전체를 하나의 트랜잭션으로 저장하고 scan_id를 반환한다.
 pub fn save_snapshot(
     conn: &mut Connection,
@@ -192,12 +250,12 @@ pub fn save_tree(
     let scan_id = tx.last_insert_rowid();
     {
         let mut node_stmt = tx.prepare(
-            "INSERT INTO nodes (scan_id, node_id, parent_id, name, logical_size, allocated_size, file_count, dir_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO nodes (scan_id, node_id, parent_id, name, logical_size, allocated_size, file_count, dir_count, newest_mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )?;
         let mut file_stmt = tx.prepare(
-            "INSERT INTO big_files (scan_id, node_id, path, logical_size, allocated_size)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO big_files (scan_id, node_id, path, logical_size, allocated_size, mtime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
 
         // 명시적 스택으로 순회 (트리 깊이에 따른 콜스택 부담 회피).
@@ -214,7 +272,8 @@ pub fn save_tree(
                 node.logical_size as i64,
                 node.allocated_size as i64,
                 node.file_count as i64,
-                node.dir_count as i64
+                node.dir_count as i64,
+                node.newest_mtime
             ])?;
             for f in &node.big_files {
                 file_stmt.execute(params![
@@ -222,7 +281,8 @@ pub fn save_tree(
                     node_id,
                     f.path.to_string_lossy(),
                     f.logical_size as i64,
-                    f.allocated_size as i64
+                    f.allocated_size as i64,
+                    f.mtime
                 ])?;
             }
             for c in &node.children {
@@ -274,7 +334,7 @@ fn load_tree(conn: &Connection, scan_id: i64) -> rusqlite::Result<Option<DirNode
         node: DirNode,
     }
     let mut stmt = conn.prepare(
-        "SELECT node_id, parent_id, name, logical_size, allocated_size, file_count, dir_count
+        "SELECT node_id, parent_id, name, logical_size, allocated_size, file_count, dir_count, newest_mtime
          FROM nodes WHERE scan_id = ?1",
     )?;
     let rows: Vec<Row> = stmt
@@ -288,6 +348,7 @@ fn load_tree(conn: &Connection, scan_id: i64) -> rusqlite::Result<Option<DirNode
                     allocated_size: row.get::<_, i64>(4)? as u64,
                     file_count: row.get::<_, i64>(5)? as u64,
                     dir_count: row.get::<_, i64>(6)? as u64,
+                    newest_mtime: row.get(7)?,
                     children: Vec::new(),
                     big_files: Vec::new(),
                 },
@@ -297,7 +358,7 @@ fn load_tree(conn: &Connection, scan_id: i64) -> rusqlite::Result<Option<DirNode
 
     let mut big: HashMap<i64, Vec<FileEntry>> = HashMap::new();
     let mut fstmt = conn.prepare(
-        "SELECT node_id, path, logical_size, allocated_size FROM big_files WHERE scan_id = ?1",
+        "SELECT node_id, path, logical_size, allocated_size, mtime FROM big_files WHERE scan_id = ?1",
     )?;
     let files = fstmt.query_map(params![scan_id], |row| {
         Ok((
@@ -306,6 +367,7 @@ fn load_tree(conn: &Connection, scan_id: i64) -> rusqlite::Result<Option<DirNode
                 path: PathBuf::from(row.get::<_, String>(1)?),
                 logical_size: row.get::<_, i64>(2)? as u64,
                 allocated_size: row.get::<_, i64>(3)? as u64,
+                mtime: row.get(4)?,
             },
         ))
     })?;
@@ -424,6 +486,54 @@ mod tests {
         drop(conn);
         let conn = open(&db).unwrap();
         assert_eq!(reclaim_log_list(&conn, root, 10).unwrap().len(), 1);
+
+        drop(conn);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn prune_keeps_recent_daily_weekly() {
+        let tmp = std::env::temp_dir().join(format!("space-index-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let mut conn = open(&tmp.join("snap.db")).unwrap();
+
+        // created_at을 직접 지정해 시간대별 스냅샷을 시뮬레이션.
+        let mut insert = |days_ago: f64, hour: u32| {
+            conn.execute(
+                "INSERT INTO scans (root_path, created_at, total_files, total_dirs)
+                 VALUES ('/r', strftime('%Y-%m-%dT', julianday('now') - ?1) || printf('%02d:00:00Z', ?2), 1, 1)",
+                params![days_ago, hour],
+            )
+            .unwrap();
+        };
+        // 최근(1일 전) 3개 — 전부 보존.
+        for h in [1u32, 2, 3] {
+            insert(1.0, h);
+        }
+        // 10일 전 같은 날 3개 — 일별 1개만.
+        for h in [1u32, 2, 3] {
+            insert(10.0, h);
+        }
+        // 60일 전 같은 날 2개 — 주별 1개만.
+        insert(60.0, 1);
+        insert(60.0, 2);
+
+        let deleted = prune_snapshots(&mut conn).unwrap();
+        assert_eq!(deleted, 3, "일별 2개 + 주별 1개 삭제");
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM scans", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 5);
+        // 고아 노드가 없어야 한다.
+        let orphans: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE scan_id NOT IN (SELECT id FROM scans)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphans, 0);
 
         drop(conn);
         let _ = fs::remove_dir_all(&tmp);

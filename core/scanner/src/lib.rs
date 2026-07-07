@@ -39,6 +39,9 @@ pub struct DirNode {
     pub allocated_size: u64,
     pub file_count: u64,
     pub dir_count: u64,
+    /// 서브트리 안 파일의 가장 최근 mtime (unix 초). 0 = 파일 없음/미상.
+    /// 스캔 중 읽는 metadata에서 나오므로 추가 IO가 없다 (F5 나이 축).
+    pub newest_mtime: i64,
     pub children: Vec<DirNode>,
     /// record_file_threshold 이상인 이 디렉토리 직속 파일들.
     pub big_files: Vec<FileEntry>,
@@ -49,6 +52,8 @@ pub struct FileEntry {
     pub path: PathBuf,
     pub logical_size: u64,
     pub allocated_size: u64,
+    /// 파일 mtime (unix 초). 0 = 미상.
+    pub mtime: i64,
 }
 
 /// 스캔 통계 (트리와 별도로 수집).
@@ -140,6 +145,7 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
     let mut logical = 0u64;
     let mut allocated = dir_md.blocks() * 512;
     let mut file_count = 0u64;
+    let mut newest_mtime = 0i64;
     let mut big_files = Vec::new();
     let mut subdirs: Vec<(PathBuf, String, fs::Metadata)> = Vec::new();
 
@@ -153,6 +159,7 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
                 allocated_size: allocated,
                 file_count: 0,
                 dir_count: 1,
+                newest_mtime,
                 children: Vec::new(),
                 big_files,
             };
@@ -188,9 +195,11 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
                 continue;
             }
             let alloc = md.blocks() * 512;
+            let mtime = md.mtime();
             logical += md.len();
             allocated += alloc;
             file_count += 1;
+            newest_mtime = newest_mtime.max(mtime);
             ctx.total_files.fetch_add(1, Ordering::Relaxed);
             if let Some(p) = &ctx.progress {
                 p.fetch_add(1, Ordering::Relaxed);
@@ -200,6 +209,7 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
                     path: entry.path(),
                     logical_size: md.len(),
                     allocated_size: alloc,
+                    mtime,
                 });
             }
         }
@@ -216,6 +226,7 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
         allocated += c.allocated_size;
         file_count += c.file_count;
         dir_count += c.dir_count;
+        newest_mtime = newest_mtime.max(c.newest_mtime);
     }
 
     DirNode {
@@ -224,6 +235,7 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
         allocated_size: allocated,
         file_count,
         dir_count,
+        newest_mtime,
         children,
         big_files,
     }
@@ -256,6 +268,10 @@ pub struct SubtreeDelta {
     pub dirs: i64,
     /// 재스캔 중 건너뛴 항목 수 (권한 등).
     pub errors: u64,
+    /// 재스캔된 서브트리의 새 newest_mtime — 조상은 max로만 갱신한다
+    /// (파일 삭제로 줄어든 경우는 다음 전체 스캔에서 회복. "더 최근"으로
+    /// 치우치는 쪽이 삭제 판단에 보수적이라 안전하다).
+    pub subtree_newest_mtime: i64,
 }
 
 impl SubtreeDelta {
@@ -266,6 +282,7 @@ impl SubtreeDelta {
             files: new.file_count as i64 - old.file_count as i64,
             dirs: new.dir_count as i64 - old.dir_count as i64,
             errors: 0,
+            subtree_newest_mtime: new.newest_mtime,
         }
     }
 
@@ -276,6 +293,7 @@ impl SubtreeDelta {
             files: -(old.file_count as i64),
             dirs: -(old.dir_count as i64),
             errors: 0,
+            subtree_newest_mtime: 0,
         }
     }
 }
@@ -285,6 +303,7 @@ fn apply_delta(node: &mut DirNode, d: &SubtreeDelta) {
     node.allocated_size = node.allocated_size.saturating_add_signed(d.allocated);
     node.file_count = node.file_count.saturating_add_signed(d.files);
     node.dir_count = node.dir_count.saturating_add_signed(d.dirs);
+    node.newest_mtime = node.newest_mtime.max(d.subtree_newest_mtime);
 }
 
 /// root 트리에서 rel_path 서브트리만 다시 스캔해 교체하고, 조상 체인의
@@ -411,6 +430,27 @@ mod tests {
     }
 
     #[test]
+    fn mtime_recorded_and_aggregated() {
+        let tmp = std::env::temp_dir().join(format!("space-mesh-mtime-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("sub")).unwrap();
+        write_file(&tmp.join("sub/f.bin"), 5_000);
+
+        let opts = ScanOptions {
+            record_file_threshold: 1_000,
+            ..Default::default()
+        };
+        let result = scan(&tmp, opts).unwrap();
+        let file_mt = fs::metadata(tmp.join("sub/f.bin")).unwrap().mtime();
+        // 개별 파일 mtime 기록 + 서브트리 최신값이 루트까지 전파.
+        assert_eq!(result.root.children[0].big_files[0].mtime, file_mt);
+        assert_eq!(result.root.newest_mtime, file_mt);
+        assert_eq!(result.root.children[0].newest_mtime, file_mt);
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
     fn hardlinks_counted_once() {
         let tmp = std::env::temp_dir().join(format!("space-mesh-hl-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
@@ -437,6 +477,14 @@ mod tests {
         );
         assert_eq!(a.file_count, b.file_count, "files of {}", a.name);
         assert_eq!(a.dir_count, b.dir_count, "dirs of {}", a.name);
+        // 증분 재스캔의 newest_mtime은 보수적(max-only) — 전체 스캔 이상이어야 한다.
+        assert!(
+            a.newest_mtime >= b.newest_mtime,
+            "newest_mtime of {}: {} < {}",
+            a.name,
+            a.newest_mtime,
+            b.newest_mtime
+        );
         let sorted = |n: &DirNode| {
             let mut v: Vec<usize> = (0..n.children.len()).collect();
             v.sort_by(|&x, &y| n.children[x].name.cmp(&n.children[y].name));

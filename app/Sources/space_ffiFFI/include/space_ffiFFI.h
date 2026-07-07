@@ -371,6 +371,11 @@ RustBuffer uniffi_space_ffi_fn_func_list_snapshots(RustBuffer db_path, RustBuffe
 void*_Nonnull uniffi_space_ffi_fn_func_load_snapshot(RustBuffer db_path, RustBuffer root_path, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_MERGE_DUPLICATES
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_MERGE_DUPLICATES
+RustBuffer uniffi_space_ffi_fn_func_merge_duplicates(RustBuffer keep, RustBuffer victims, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_OPEN_DIFF
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_OPEN_DIFF
 void*_Nonnull uniffi_space_ffi_fn_func_open_diff(RustBuffer db_path, int64_t old_id, int64_t new_id, RustCallStatus *_Nonnull out_status
@@ -731,6 +736,12 @@ uint16_t uniffi_space_ffi_checksum_func_list_snapshots(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_LOAD_SNAPSHOT
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_LOAD_SNAPSHOT
 uint16_t uniffi_space_ffi_checksum_func_load_snapshot(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_MERGE_DUPLICATES
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_MERGE_DUPLICATES
+uint16_t uniffi_space_ffi_checksum_func_merge_duplicates(void
     
 );
 #endif

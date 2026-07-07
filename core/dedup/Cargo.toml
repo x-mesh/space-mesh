@@ -7,3 +7,4 @@ edition.workspace = true
 space-scanner = { path = "../scanner" }
 rayon = { workspace = true }
 blake3 = "1"
+libc = "0.2"

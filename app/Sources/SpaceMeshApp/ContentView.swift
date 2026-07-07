@@ -20,6 +20,8 @@ struct ContentView: View {
     @State private var previewURL: URL?
     @State private var mode: ViewMode = .treemap
     @State private var fdaBannerDismissed = false
+    @State private var oldFilesOnly = false
+    @StateObject private var volume = VolumeStatus()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -53,6 +55,15 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
         .quickLookPreview($previewURL)
+        .onAppear { volume.refresh(path: scanTarget) }
+        .onChange(of: model.scanSeconds) { volume.refresh(path: scanTarget) }
+    }
+
+    /// 사이드바 대용량 파일 — 나이 필터 적용분 (F5).
+    private var filteredBigFiles: [BigFile] {
+        guard oldFilesOnly else { return model.bigFiles }
+        let cutoff = Int64(Date().timeIntervalSince1970) - 90 * 86_400
+        return model.bigFiles.filter { $0.mtime > 0 && $0.mtime < cutoff }
     }
 
     // MARK: - Full Disk Access 안내 (F9)
@@ -172,6 +183,20 @@ struct ContentView: View {
 
             Spacer()
 
+            // 볼륨 게이지 (F4) — 여유/회수 대기(purgeable)/로컬 스냅샷.
+            if let vol = volume.info {
+                HStack(spacing: 12) {
+                    readoutItem(value: humanBytes(vol.free), label: "FREE")
+                    if vol.purgeable > 0 {
+                        readoutItem(value: "+" + humanBytes(vol.purgeable), label: "PURGEABLE")
+                            .help("시스템이 필요 시 자동 회수하는 보류 공간 — 로컬 스냅샷·휴지통 등. 지워도 여유가 바로 늘지 않는 이유입니다")
+                    }
+                    if vol.localSnapshots > 0 {
+                        readoutItem(value: "\(vol.localSnapshots)", label: "TM SNAP")
+                            .help("Time Machine 로컬 스냅샷 — tmutil deletelocalsnapshots로 정리할 수 있습니다")
+                    }
+                }
+            }
             if let stats = model.stats, let secs = model.scanSeconds, !model.isScanning {
                 HStack(spacing: 12) {
                     readoutItem(value: stats.totalFiles.formatted(), label: "FILES")
@@ -322,7 +347,7 @@ struct ContentView: View {
             }
             if !model.bigFiles.isEmpty {
                 Section {
-                    ForEach(model.bigFiles, id: \.path) { file in
+                    ForEach(filteredBigFiles, id: \.path) { file in
                         HStack(spacing: 8) {
                             Image(systemName: "doc")
                                 .font(.system(size: 10))
@@ -332,6 +357,9 @@ struct ContentView: View {
                                 .foregroundStyle(Theme.text)
                                 .lineLimit(1)
                             Spacer()
+                            Text(humanAge(file.mtime))
+                                .font(.pathCell)
+                                .foregroundStyle(Theme.textFaint)
                             Text(humanBytes(file.allocatedSize))
                                 .font(.dataCell)
                                 .foregroundStyle(Theme.textDim)
@@ -356,7 +384,26 @@ struct ContentView: View {
                         .listRowBackground(Theme.bg)
                     }
                 } header: {
-                    InstrumentLabel(text: "대용량 파일 · 직속")
+                    HStack(spacing: 8) {
+                        InstrumentLabel(text: "대용량 파일 · 직속")
+                        Spacer()
+                        // 나이 필터 — 오래된 것이 회수 후보의 핵심 신호 (F5).
+                        Button {
+                            oldFilesOnly.toggle()
+                        } label: {
+                            Text("90일+")
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(oldFilesOnly ? Theme.bg : Theme.textDim)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(
+                                    oldFilesOnly ? Theme.accent : Theme.raised,
+                                    in: Capsule()
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .help("90일 이상 수정되지 않은 파일만 표시")
+                    }
                 }
             }
         }

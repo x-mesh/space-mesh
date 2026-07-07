@@ -989,13 +989,21 @@ public struct BigFile {
     public var path: String
     public var logicalSize: UInt64
     public var allocatedSize: UInt64
+    /**
+     * 파일 mtime (unix 초). 0 = 미상.
+     */
+    public var mtime: Int64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(path: String, logicalSize: UInt64, allocatedSize: UInt64) {
+    public init(path: String, logicalSize: UInt64, allocatedSize: UInt64, 
+        /**
+         * 파일 mtime (unix 초). 0 = 미상.
+         */mtime: Int64) {
         self.path = path
         self.logicalSize = logicalSize
         self.allocatedSize = allocatedSize
+        self.mtime = mtime
     }
 }
 
@@ -1015,6 +1023,9 @@ extension BigFile: Equatable, Hashable {
         if lhs.allocatedSize != rhs.allocatedSize {
             return false
         }
+        if lhs.mtime != rhs.mtime {
+            return false
+        }
         return true
     }
 
@@ -1022,6 +1033,7 @@ extension BigFile: Equatable, Hashable {
         hasher.combine(path)
         hasher.combine(logicalSize)
         hasher.combine(allocatedSize)
+        hasher.combine(mtime)
     }
 }
 
@@ -1036,7 +1048,8 @@ public struct FfiConverterTypeBigFile: FfiConverterRustBuffer {
             try BigFile(
                 path: FfiConverterString.read(from: &buf), 
                 logicalSize: FfiConverterUInt64.read(from: &buf), 
-                allocatedSize: FfiConverterUInt64.read(from: &buf)
+                allocatedSize: FfiConverterUInt64.read(from: &buf), 
+                mtime: FfiConverterInt64.read(from: &buf)
         )
     }
 
@@ -1044,6 +1057,7 @@ public struct FfiConverterTypeBigFile: FfiConverterRustBuffer {
         FfiConverterString.write(value.path, into: &buf)
         FfiConverterUInt64.write(value.logicalSize, into: &buf)
         FfiConverterUInt64.write(value.allocatedSize, into: &buf)
+        FfiConverterInt64.write(value.mtime, into: &buf)
     }
 }
 
@@ -1580,15 +1594,29 @@ public func FfiConverterTypeDiffEntryInfo_lower(_ value: DiffEntryInfo) -> RustB
 
 public struct DupGroupInfo {
     public var fileSize: UInt64
+    /**
+     * 클론 공유 블록 보정 후 회수 가능량.
+     */
     public var reclaimable: UInt64
+    /**
+     * true = 이미 APFS 클론으로 블록을 공유하는 파일이 있다 (지워도 회수 0).
+     */
+    public var cloneShared: Bool
     public var hashHex: String
     public var files: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(fileSize: UInt64, reclaimable: UInt64, hashHex: String, files: [String]) {
+    public init(fileSize: UInt64, 
+        /**
+         * 클론 공유 블록 보정 후 회수 가능량.
+         */reclaimable: UInt64, 
+        /**
+         * true = 이미 APFS 클론으로 블록을 공유하는 파일이 있다 (지워도 회수 0).
+         */cloneShared: Bool, hashHex: String, files: [String]) {
         self.fileSize = fileSize
         self.reclaimable = reclaimable
+        self.cloneShared = cloneShared
         self.hashHex = hashHex
         self.files = files
     }
@@ -1607,6 +1635,9 @@ extension DupGroupInfo: Equatable, Hashable {
         if lhs.reclaimable != rhs.reclaimable {
             return false
         }
+        if lhs.cloneShared != rhs.cloneShared {
+            return false
+        }
         if lhs.hashHex != rhs.hashHex {
             return false
         }
@@ -1619,6 +1650,7 @@ extension DupGroupInfo: Equatable, Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(fileSize)
         hasher.combine(reclaimable)
+        hasher.combine(cloneShared)
         hasher.combine(hashHex)
         hasher.combine(files)
     }
@@ -1635,6 +1667,7 @@ public struct FfiConverterTypeDupGroupInfo: FfiConverterRustBuffer {
             try DupGroupInfo(
                 fileSize: FfiConverterUInt64.read(from: &buf), 
                 reclaimable: FfiConverterUInt64.read(from: &buf), 
+                cloneShared: FfiConverterBool.read(from: &buf), 
                 hashHex: FfiConverterString.read(from: &buf), 
                 files: FfiConverterSequenceString.read(from: &buf)
         )
@@ -1643,6 +1676,7 @@ public struct FfiConverterTypeDupGroupInfo: FfiConverterRustBuffer {
     public static func write(_ value: DupGroupInfo, into buf: inout [UInt8]) {
         FfiConverterUInt64.write(value.fileSize, into: &buf)
         FfiConverterUInt64.write(value.reclaimable, into: &buf)
+        FfiConverterBool.write(value.cloneShared, into: &buf)
         FfiConverterString.write(value.hashHex, into: &buf)
         FfiConverterSequenceString.write(value.files, into: &buf)
     }
@@ -1988,6 +2022,93 @@ public func FfiConverterTypeGitReport_lower(_ value: GitReport) -> RustBuffer {
 
 
 /**
+ * 중복 그룹 병합 결과 (F3).
+ */
+public struct MergeResult {
+    public var merged: UInt32
+    public var failed: UInt32
+    /**
+     * 회수 추정치 상한 (victim들이 점유하던 블록 합).
+     */
+    public var reclaimed: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(merged: UInt32, failed: UInt32, 
+        /**
+         * 회수 추정치 상한 (victim들이 점유하던 블록 합).
+         */reclaimed: UInt64) {
+        self.merged = merged
+        self.failed = failed
+        self.reclaimed = reclaimed
+    }
+}
+
+#if compiler(>=6)
+extension MergeResult: Sendable {}
+#endif
+
+
+extension MergeResult: Equatable, Hashable {
+    public static func ==(lhs: MergeResult, rhs: MergeResult) -> Bool {
+        if lhs.merged != rhs.merged {
+            return false
+        }
+        if lhs.failed != rhs.failed {
+            return false
+        }
+        if lhs.reclaimed != rhs.reclaimed {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(merged)
+        hasher.combine(failed)
+        hasher.combine(reclaimed)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMergeResult: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MergeResult {
+        return
+            try MergeResult(
+                merged: FfiConverterUInt32.read(from: &buf), 
+                failed: FfiConverterUInt32.read(from: &buf), 
+                reclaimed: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MergeResult, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.merged, into: &buf)
+        FfiConverterUInt32.write(value.failed, into: &buf)
+        FfiConverterUInt64.write(value.reclaimed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMergeResult_lift(_ buf: RustBuffer) throws -> MergeResult {
+    return try FfiConverterTypeMergeResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMergeResult_lower(_ value: MergeResult) -> RustBuffer {
+    return FfiConverterTypeMergeResult.lower(value)
+}
+
+
+/**
  * 한 노드의 표시용 정보. children은 포함하지 않는다 (레벨 단위 조회).
  */
 public struct NodeInfo {
@@ -2001,13 +2122,20 @@ public struct NodeInfo {
     public var fileCount: UInt64
     public var dirCount: UInt64
     public var childCount: UInt32
+    /**
+     * 서브트리 최신 파일 mtime (unix 초). 0 = 미상 (나이 오버레이용, F5).
+     */
+    public var newestMtime: Int64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * 부모의 children 내 원본 index — drilldown 시 index path 구성에 사용.
-         */index: UInt32, name: String, logicalSize: UInt64, allocatedSize: UInt64, fileCount: UInt64, dirCount: UInt64, childCount: UInt32) {
+         */index: UInt32, name: String, logicalSize: UInt64, allocatedSize: UInt64, fileCount: UInt64, dirCount: UInt64, childCount: UInt32, 
+        /**
+         * 서브트리 최신 파일 mtime (unix 초). 0 = 미상 (나이 오버레이용, F5).
+         */newestMtime: Int64) {
         self.index = index
         self.name = name
         self.logicalSize = logicalSize
@@ -2015,6 +2143,7 @@ public struct NodeInfo {
         self.fileCount = fileCount
         self.dirCount = dirCount
         self.childCount = childCount
+        self.newestMtime = newestMtime
     }
 }
 
@@ -2046,6 +2175,9 @@ extension NodeInfo: Equatable, Hashable {
         if lhs.childCount != rhs.childCount {
             return false
         }
+        if lhs.newestMtime != rhs.newestMtime {
+            return false
+        }
         return true
     }
 
@@ -2057,6 +2189,7 @@ extension NodeInfo: Equatable, Hashable {
         hasher.combine(fileCount)
         hasher.combine(dirCount)
         hasher.combine(childCount)
+        hasher.combine(newestMtime)
     }
 }
 
@@ -2075,7 +2208,8 @@ public struct FfiConverterTypeNodeInfo: FfiConverterRustBuffer {
                 allocatedSize: FfiConverterUInt64.read(from: &buf), 
                 fileCount: FfiConverterUInt64.read(from: &buf), 
                 dirCount: FfiConverterUInt64.read(from: &buf), 
-                childCount: FfiConverterUInt32.read(from: &buf)
+                childCount: FfiConverterUInt32.read(from: &buf), 
+                newestMtime: FfiConverterInt64.read(from: &buf)
         )
     }
 
@@ -2087,6 +2221,7 @@ public struct FfiConverterTypeNodeInfo: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.fileCount, into: &buf)
         FfiConverterUInt64.write(value.dirCount, into: &buf)
         FfiConverterUInt32.write(value.childCount, into: &buf)
+        FfiConverterInt64.write(value.newestMtime, into: &buf)
     }
 }
 
@@ -3182,6 +3317,19 @@ public func loadSnapshot(dbPath: String, rootPath: String)throws  -> ScanHandle 
     )
 })
 }
+/**
+ * victim들을 keep의 APFS 클론 사본으로 교체한다 — 데이터 손실 없는 회수.
+ * 각 victim은 교체 직전 재해시로 동일성을 재확인하며, 실패한 항목은 무손상으로
+ * 남는다. 블로킹(해시 IO) — 백그라운드에서 호출.
+ */
+public func mergeDuplicates(keep: String, victims: [String]) -> MergeResult  {
+    return try!  FfiConverterTypeMergeResult_lift(try! rustCall() {
+    uniffi_space_ffi_fn_func_merge_duplicates(
+        FfiConverterString.lower(keep),
+        FfiConverterSequenceString.lower(victims),$0
+    )
+})
+}
 public func openDiff(dbPath: String, oldId: Int64, newId: Int64)throws  -> DiffHandle  {
     return try  FfiConverterTypeDiffHandle_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
     uniffi_space_ffi_fn_func_open_diff(
@@ -3304,6 +3452,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_func_load_snapshot() != 63787) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_func_merge_duplicates() != 29292) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_func_open_diff() != 51550) {
