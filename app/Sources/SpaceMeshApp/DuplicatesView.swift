@@ -15,10 +15,17 @@ struct DuplicatesView: View {
     @State private var previewURL: URL?
 
     private var selectedItems: [(path: String, size: UInt64)] {
-        model.dupGroups.flatMap { group in
-            group.files
+        model.dupGroups.flatMap { group -> [(String, UInt64)] in
+            // 항목당 가격은 클론 보정된 그룹 회수 가능량을 잠재 victim 수로 나눈 값 —
+            // 이미 클론인 그룹(회수 0)을 fileSize 전액으로 계산해 예상치를
+            // 부풀리지 않는다 (헤더의 보정 표시와 일관).
+            let perVictim =
+                group.files.count > 1
+                ? group.reclaimable / UInt64(group.files.count - 1)
+                : 0
+            return group.files
                 .filter { model.selectedDupPaths.contains($0) }
-                .map { ($0, group.fileSize) }
+                .map { ($0, perVictim) }
         }
     }
     private var selectedSize: UInt64 {

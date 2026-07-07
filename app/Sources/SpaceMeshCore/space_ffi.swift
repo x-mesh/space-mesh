@@ -730,6 +730,12 @@ public protocol ScanHandleProtocol: AnyObject, Sendable {
     /**
      * 절대 경로 목록이 가리키는 서브트리만 다시 스캔해 트리를 갱신한다.
      * 루트 밖 경로는 무시하고, 포함 관계인 경로는 최상위만 재스캔한다.
+     *
+     * - 경로 매칭은 루트의 원 표기와 canonicalize된 실경로 양쪽을 시도한다 —
+     * FSEvents는 심볼릭 링크가 해석된 경로(/private/tmp/…)를 전달하기 때문.
+     * - 디스크 스캔은 락 없이 수행하고, 트리 접합만 짧은 쓰기 락으로 처리해
+     * UI 조회가 스캔 시간만큼 블로킹되지 않는다.
+     *
      * 블로킹(서브트리 크기에 비례) — Swift는 백그라운드에서 직렬로 호출할 것.
      */
     func refreshPaths(absPaths: [String], minFileMib: UInt64) throws  -> RefreshSummary
@@ -888,6 +894,12 @@ open func nodeAt(indexPath: [UInt32])throws  -> NodeInfo  {
     /**
      * 절대 경로 목록이 가리키는 서브트리만 다시 스캔해 트리를 갱신한다.
      * 루트 밖 경로는 무시하고, 포함 관계인 경로는 최상위만 재스캔한다.
+     *
+     * - 경로 매칭은 루트의 원 표기와 canonicalize된 실경로 양쪽을 시도한다 —
+     * FSEvents는 심볼릭 링크가 해석된 경로(/private/tmp/…)를 전달하기 때문.
+     * - 디스크 스캔은 락 없이 수행하고, 트리 접합만 짧은 쓰기 락으로 처리해
+     * UI 조회가 스캔 시간만큼 블로킹되지 않는다.
+     *
      * 블로킹(서브트리 크기에 비례) — Swift는 백그라운드에서 직렬로 호출할 것.
      */
 open func refreshPaths(absPaths: [String], minFileMib: UInt64)throws  -> RefreshSummary  {
@@ -3319,8 +3331,8 @@ public func loadSnapshot(dbPath: String, rootPath: String)throws  -> ScanHandle 
 }
 /**
  * victim들을 keep의 APFS 클론 사본으로 교체한다 — 데이터 손실 없는 회수.
- * 각 victim은 교체 직전 재해시로 동일성을 재확인하며, 실패한 항목은 무손상으로
- * 남는다. 블로킹(해시 IO) — 백그라운드에서 호출.
+ * keep은 배치당 1회만 해시하고, 각 victim은 교체 직전 재해시로 동일성을
+ * 재확인한다. 실패한 항목은 무손상으로 남는다. 블로킹(해시 IO) — 백그라운드에서 호출.
  */
 public func mergeDuplicates(keep: String, victims: [String]) -> MergeResult  {
     return try!  FfiConverterTypeMergeResult_lift(try! rustCall() {
@@ -3454,7 +3466,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_space_ffi_checksum_func_load_snapshot() != 63787) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_space_ffi_checksum_func_merge_duplicates() != 29292) {
+    if (uniffi_space_ffi_checksum_func_merge_duplicates() != 10674) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_func_open_diff() != 51550) {
@@ -3514,7 +3526,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_space_ffi_checksum_method_scanhandle_node_at() != 21162) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_space_ffi_checksum_method_scanhandle_refresh_paths() != 10205) {
+    if (uniffi_space_ffi_checksum_method_scanhandle_refresh_paths() != 17905) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_save_to_db() != 44052) {

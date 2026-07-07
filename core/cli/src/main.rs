@@ -7,8 +7,9 @@ use std::time::Instant;
 #[derive(Parser, Debug)]
 #[command(name = "space-mesh", version)]
 struct Args {
-    /// 스캔할 루트 디렉토리
-    path: PathBuf,
+    /// 스캔할 루트 디렉토리 (--detect/--advise는 경로가 필요 없다)
+    #[arg(required_unless_present_any = ["detect", "advise"])]
+    path: Option<PathBuf>,
 
     /// 레벨당 표시할 최대 항목 수
     #[arg(long, default_value_t = 10)]
@@ -110,7 +111,7 @@ fn main() {
             eprintln!("error: open db {}: {}", db_path.display(), e);
             std::process::exit(1);
         });
-        match space_index::load_latest(&conn, &args.path) {
+        match space_index::load_latest(&conn, args.scan_root()) {
             Ok(Some((meta, root))) => {
                 let src = format!("snapshot #{} ({})", meta.scan_id, meta.created_at);
                 (root, meta.total_files, meta.total_dirs, 0, src)
@@ -118,7 +119,7 @@ fn main() {
             Ok(None) => {
                 eprintln!(
                     "error: no snapshot for {} in {}",
-                    args.path.display(),
+                    args.scan_root().display(),
                     db_path.display()
                 );
                 std::process::exit(1);
@@ -129,10 +130,10 @@ fn main() {
             }
         }
     } else {
-        let result = match scan(&args.path, opts) {
+        let result = match scan(args.scan_root(), opts) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("error: {}: {}", args.path.display(), e);
+                eprintln!("error: {}: {}", args.scan_root().display(), e);
                 std::process::exit(1);
             }
         };
@@ -141,7 +142,7 @@ fn main() {
                 eprintln!("error: open db {}: {}", db_path.display(), e);
                 std::process::exit(1);
             });
-            match space_index::save_snapshot(&mut conn, &args.path, &result) {
+            match space_index::save_snapshot(&mut conn, args.scan_root(), &result) {
                 Ok(id) => eprintln!("snapshot #{} saved to {}", id, db_path.display()),
                 Err(e) => eprintln!("warning: snapshot save failed: {}", e),
             }
@@ -221,10 +222,20 @@ fn main() {
     }
 }
 
+impl Args {
+    /// detect/advise 외 모드에서는 clap의 required_unless가 존재를 보장한다.
+    fn scan_root(&self) -> &PathBuf {
+        self.path
+            .as_ref()
+            .expect("clap enforces path for this mode")
+    }
+}
+
 fn home_dir(args: &Args) -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| args.path.clone())
+        .or_else(|| args.path.clone())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// 내장 룰셋으로 홈의 정리 후보 탐지 (F8). --json 스키마는 FFI Record와 필드명 일치.
@@ -261,12 +272,15 @@ fn run_detect(args: &Args) {
 
 /// path 아래 중복 파일 그룹 (F8). 클론 공유 보정 포함.
 fn run_dups(args: &Args) {
-    let result =
-        space_dedup::find_duplicates(&args.path, args.min_file_mib.max(1) * 1024 * 1024, None)
-            .unwrap_or_else(|e| {
-                eprintln!("error: dups: {}", e);
-                std::process::exit(1);
-            });
+    let result = space_dedup::find_duplicates(
+        args.scan_root(),
+        args.min_file_mib.max(1) * 1024 * 1024,
+        None,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("error: dups: {}", e);
+        std::process::exit(1);
+    });
     if args.json {
         let out = serde_json::json!({
             "groups": result.groups.iter().map(|g| serde_json::json!({
@@ -349,7 +363,7 @@ fn build_suggestions(args: &Args, root: &DirNode) -> serde_json::Value {
         }));
     }
 
-    let hits = space_rules::categories::find_categories(root, &args.path);
+    let hits = space_rules::categories::find_categories(root, args.scan_root());
     let idle = space_rules::categories::annotate_idle(&hits);
     for h in &hits {
         let days = idle.get(&h.project_path).copied();
@@ -376,7 +390,7 @@ fn build_suggestions(args: &Args, root: &DirNode) -> serde_json::Value {
     serde_json::json!({
         "version": 1,
         "generated_at": generated_at,
-        "root": args.path,
+        "root": args.scan_root(),
         "idle_days": args.idle_days,
         "total_estimated": total,
         "below_threshold": below,
@@ -391,14 +405,14 @@ fn run_diff(args: &Args) {
         eprintln!("error: open db {}: {}", db_path.display(), e);
         std::process::exit(1);
     });
-    let snaps = space_index::list_snapshots(&conn, &args.path).unwrap_or_else(|e| {
+    let snaps = space_index::list_snapshots(&conn, args.scan_root()).unwrap_or_else(|e| {
         eprintln!("error: list snapshots: {}", e);
         std::process::exit(1);
     });
     if snaps.len() < 2 {
         eprintln!(
             "error: {}의 스냅샷이 {}개 — diff에는 2개 이상 필요 (--db로 스캔을 두 번 실행)",
-            args.path.display(),
+            args.scan_root().display(),
             snaps.len()
         );
         std::process::exit(1);

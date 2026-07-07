@@ -19,6 +19,8 @@ pub struct SnapshotMeta {
 
 pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(db_path)?;
+    // 앱과 launchd CLI가 같은 DB에 동시 접근한다 — 잠금 경합 시 즉시 실패하지 않게.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.execute_batch(
@@ -57,14 +59,19 @@ pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
 /// 스키마 버전. PRAGMA user_version으로 추적한다 (0 = Phase 1 초기 스키마).
 const SCHEMA_VERSION: i64 = 2;
 
-/// user_version 기반 순차 마이그레이션. 각 단계는 멱등적이지 않아도 되지만
-/// (버전 검사로 1회만 실행) 실패 시 버전을 올리지 않아 다음 open에서 재시도된다.
+/// user_version 기반 순차 마이그레이션.
+///
+/// 각 단계는 스키마 변경과 user_version 갱신을 **하나의 트랜잭션**으로 묶는다 —
+/// 부분 실패(SQLITE_BUSY, 디스크 풀, 강제 종료)가 절반 적용된 스키마를 남기면
+/// 재시도가 영구히 실패(duplicate column)하기 때문이다. 추가로 컬럼 존재를
+/// 확인해, 과거 비원자적 단계가 남긴 DB도 복구된다.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version < 1 {
         // v1: 회수 실행 이력 (F1). 예상 vs 측정 회수량을 남겨 '변화' 탭 마커로 쓴다.
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS reclaim_log (
+            "BEGIN;
+             CREATE TABLE IF NOT EXISTS reclaim_log (
                 id INTEGER PRIMARY KEY,
                 executed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
                 root_path TEXT NOT NULL,
@@ -72,22 +79,39 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                 estimated INTEGER NOT NULL,
                 measured INTEGER,
                 undone INTEGER NOT NULL DEFAULT 0
-            );",
+             );
+             PRAGMA user_version = 1;
+             COMMIT;",
         )?;
         version = 1;
-        conn.pragma_update(None, "user_version", version)?;
     }
     if version < 2 {
         // v2: 나이 축 (F5). 구버전 스냅샷은 0 = 나이 미상으로 로드된다.
-        conn.execute_batch(
-            "ALTER TABLE nodes ADD COLUMN newest_mtime INTEGER NOT NULL DEFAULT 0;
-             ALTER TABLE big_files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0;",
-        )?;
+        // ALTER는 IF NOT EXISTS가 없으므로 존재 검사로 멱등성을 확보한다.
+        let mut sql = String::from("BEGIN;");
+        if !has_column(conn, "nodes", "newest_mtime")? {
+            sql.push_str("ALTER TABLE nodes ADD COLUMN newest_mtime INTEGER NOT NULL DEFAULT 0;");
+        }
+        if !has_column(conn, "big_files", "mtime")? {
+            sql.push_str("ALTER TABLE big_files ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0;");
+        }
+        sql.push_str("PRAGMA user_version = 2; COMMIT;");
+        conn.execute_batch(&sql)?;
         version = 2;
-        conn.pragma_update(None, "user_version", version)?;
     }
     debug_assert_eq!(version, SCHEMA_VERSION);
     Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // ───────────────────────── 회수 이력 (F1) ─────────────────────────
@@ -486,6 +510,36 @@ mod tests {
         drop(conn);
         let conn = open(&db).unwrap();
         assert_eq!(reclaim_log_list(&conn, root, 10).unwrap().len(), 1);
+
+        drop(conn);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn migration_recovers_half_applied_v2() {
+        let tmp = std::env::temp_dir().join(format!("space-index-halfmig-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let db = tmp.join("snap.db");
+
+        // 과거 비원자적 마이그레이션이 절반만 적용된 상태를 재현:
+        // nodes에만 컬럼이 있고 user_version은 1에 머문 DB.
+        {
+            let conn = open(&db).unwrap(); // 정상 v2 스키마 생성
+            conn.execute_batch(
+                "ALTER TABLE big_files DROP COLUMN mtime;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        // 재-open 시 duplicate column 없이 복구되어야 한다.
+        let conn = open(&db).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(has_column(&conn, "nodes", "newest_mtime").unwrap());
+        assert!(has_column(&conn, "big_files", "mtime").unwrap());
 
         drop(conn);
         let _ = fs::remove_dir_all(&tmp);

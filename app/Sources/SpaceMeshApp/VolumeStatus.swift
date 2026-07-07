@@ -20,14 +20,28 @@ struct VolumeInfo {
 final class VolumeStatus: ObservableObject {
     @Published var info: VolumeInfo?
 
+    /// tmutil 프로세스 실행은 비싸고 스냅샷 수는 천천히 변한다 — 10분 캐시.
+    private var snapshotCount = 0
+    private var snapshotCountAt: Date?
+
     func refresh(path: String) {
+        let cached: Int? = {
+            guard let at = snapshotCountAt, Date().timeIntervalSince(at) < 600 else { return nil }
+            return snapshotCount
+        }()
         Task {
-            let loaded = await Task.detached(priority: .utility) { Self.load(path: path) }.value
+            let loaded = await Task.detached(priority: .utility) {
+                Self.load(path: path, cachedSnapshots: cached)
+            }.value
+            if let loaded, cached == nil {
+                self.snapshotCount = loaded.localSnapshots
+                self.snapshotCountAt = Date()
+            }
             self.info = loaded
         }
     }
 
-    nonisolated static func load(path: String) -> VolumeInfo? {
+    nonisolated static func load(path: String, cachedSnapshots: Int?) -> VolumeInfo? {
         let url = URL(fileURLWithPath: path)
         guard
             let values = try? url.resourceValues(forKeys: [
@@ -43,7 +57,7 @@ final class VolumeStatus: ObservableObject {
             total: UInt64(max(0, total)),
             free: UInt64(max(0, free)),
             freeImportant: UInt64(max(0, important)),
-            localSnapshots: countLocalSnapshots()
+            localSnapshots: cachedSnapshots ?? countLocalSnapshots()
         )
     }
 

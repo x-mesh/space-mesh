@@ -93,6 +93,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 증분 재스캔이 트리를 변형한 뒤 호출 — children 배열이 재구성되면 저장된
+    /// 인덱스가 다른 형제를 가리킬 수 있으므로, breadcrumb 이름으로 indexPath를
+    /// 다시 해석한다. 사라진 구간은 존재하는 가장 깊은 조상까지 잘라낸다.
+    func revalidatePath() {
+        guard let handle else { return }
+        var newIndexPath: [UInt32] = []
+        var newCrumbs: [String] = []
+        for name in breadcrumb {
+            guard let kids = try? handle.children(indexPath: newIndexPath),
+                let match = kids.first(where: { $0.name == name })
+            else { break }
+            newIndexPath.append(match.index)
+            newCrumbs.append(name)
+        }
+        indexPath = newIndexPath
+        breadcrumb = newCrumbs
+        reload()
+    }
+
     func fullPath(of node: NodeInfo) -> String? {
         try? handle?.fullPath(indexPath: indexPath + [node.index])
     }

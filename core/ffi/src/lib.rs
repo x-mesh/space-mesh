@@ -3,7 +3,7 @@
 //! 트리는 재귀 Record로 넘기지 않고(ScanHandle이 소유), Swift는 index path(Vec<u32>)로
 //! 레벨 단위 조회한다 — 수십만 노드를 FFI 경계 너머로 복사하지 않기 위한 설계.
 
-use space_scanner::{rescan_subtree, scan_with_progress, DirNode, ScanOptions};
+use space_scanner::{scan_with_progress, DirNode, ScanOptions};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, RwLock};
@@ -193,25 +193,41 @@ pub struct RefreshSummary {
 impl ScanHandle {
     /// 절대 경로 목록이 가리키는 서브트리만 다시 스캔해 트리를 갱신한다.
     /// 루트 밖 경로는 무시하고, 포함 관계인 경로는 최상위만 재스캔한다.
+    ///
+    /// - 경로 매칭은 루트의 원 표기와 canonicalize된 실경로 양쪽을 시도한다 —
+    ///   FSEvents는 심볼릭 링크가 해석된 경로(/private/tmp/…)를 전달하기 때문.
+    /// - 디스크 스캔은 락 없이 수행하고, 트리 접합만 짧은 쓰기 락으로 처리해
+    ///   UI 조회가 스캔 시간만큼 블로킹되지 않는다.
+    ///
     /// 블로킹(서브트리 크기에 비례) — Swift는 백그라운드에서 직렬로 호출할 것.
     pub fn refresh_paths(
         &self,
         abs_paths: Vec<String>,
         min_file_mib: u64,
     ) -> Result<RefreshSummary, ScanError> {
+        use space_scanner::{
+            deepest_existing_path, rel_segments, remove_missing, scan_subtree, splice_subtree,
+        };
+
         let started = std::time::Instant::now();
         let opts = ScanOptions {
             record_file_threshold: min_file_mib * 1024 * 1024,
             ..Default::default()
         };
+        let canonical_root = std::fs::canonicalize(&self.root_path).ok();
 
-        // 루트 기준 상대 경로로 정규화. 루트 자신/루트 밖은 규칙대로 처리.
+        // 루트 기준 상대 경로로 정규화 (원 표기 → 실경로 순으로 매칭).
         let mut rels: Vec<PathBuf> = Vec::new();
         for p in &abs_paths {
             let p = Path::new(p);
-            match p.strip_prefix(&self.root_path) {
-                Ok(rel) => rels.push(rel.to_path_buf()),
-                Err(_) => continue, // 루트 밖 — 무시
+            let rel = p.strip_prefix(&self.root_path).ok().or_else(|| {
+                canonical_root
+                    .as_deref()
+                    .and_then(|c| p.strip_prefix(c).ok())
+            });
+            match rel {
+                Some(rel) => rels.push(rel.to_path_buf()),
+                None => continue, // 루트 밖 — 무시
             }
         }
         // 포함 관계 정규화: 정렬 후, 직전에 남긴 경로의 하위면 건너뛴다.
@@ -226,33 +242,79 @@ impl ScanHandle {
             targets.push(rel);
         }
 
-        let mut root = self.root.write().unwrap();
         let mut delta_allocated = 0i64;
         let mut delta_files = 0i64;
         let mut delta_dirs = 0i64;
         let mut errors = 0u64;
         let mut refreshed = 0u32;
         for rel in &targets {
-            match rescan_subtree(&mut root, &self.root_path, rel, &opts) {
-                Ok(d) => {
-                    delta_allocated += d.allocated;
-                    delta_files += d.files;
-                    delta_dirs += d.dirs;
-                    errors += d.errors;
-                    refreshed += 1;
+            let segments = match rel_segments(rel) {
+                Ok(s) => s,
+                Err(_) => {
+                    errors += 1;
+                    continue;
                 }
-                // 루트 자체가 사라진 경우만 에러로 승격, 나머지는 다음 항목 진행.
-                Err(e) if rel.as_os_str().is_empty() => {
-                    return Err(ScanError::Io { msg: e.to_string() })
+            };
+            // ① 짧은 읽기 락: 트리에 존재하는 가장 깊은 조상을 찾는다.
+            let names = {
+                let root = self.root.read().unwrap();
+                deepest_existing_path(&root, &segments)
+            };
+            let disk_path: PathBuf = self.root_path.join(names.iter().collect::<PathBuf>());
+
+            // ② 락 없이 디스크 스캔 — UI 조회는 이 동안 자유롭게 진행된다.
+            let scanned = match std::fs::symlink_metadata(&disk_path) {
+                Ok(md) if md.is_dir() => {
+                    let name = names
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| self.root.read().unwrap().name.clone());
+                    match scan_subtree(&disk_path, name, &opts) {
+                        Ok((fresh, errs)) => {
+                            errors += errs;
+                            Some(Some(fresh))
+                        }
+                        Err(_) => {
+                            errors += 1;
+                            None
+                        }
+                    }
                 }
-                Err(_) => errors += 1,
+                Ok(_) | Err(_) if names.is_empty() => {
+                    return Err(ScanError::Io {
+                        msg: "scan root disappeared or unreadable".into(),
+                    });
+                }
+                Ok(_) => Some(None), // 더 이상 디렉토리가 아님 → 제거
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(None), // 사라짐 → 제거
+                // 권한/IO 일시 오류 — 삭제로 오인하지 않고 트리 유지.
+                Err(_) => {
+                    errors += 1;
+                    None
+                }
+            };
+            let Some(fresh) = scanned else { continue };
+
+            // ③ 짧은 쓰기 락: 접합 + 조상 델타 갱신.
+            let mut root = self.root.write().unwrap();
+            let delta = match fresh {
+                Some(fresh) => splice_subtree(&mut root, &names, Some(fresh)),
+                // 제거는 사라짐이 시작된 최상위 조상부터 (조상별 stat 몇 번 — 짧음).
+                None => Some(remove_missing(&mut root, &self.root_path, &names)),
+            };
+            if let Some(d) = delta {
+                delta_allocated += d.allocated;
+                delta_files += d.files;
+                delta_dirs += d.dirs;
+                errors += d.errors;
+                refreshed += 1;
             }
         }
-        drop(root);
 
         let mut stats = self.stats.write().unwrap();
         stats.total_files = stats.total_files.saturating_add_signed(delta_files);
         stats.total_dirs = stats.total_dirs.saturating_add_signed(delta_dirs);
+        stats.errors += errors;
 
         Ok(RefreshSummary {
             refreshed_subtrees: refreshed,
@@ -446,27 +508,16 @@ pub struct MergeResult {
 }
 
 /// victim들을 keep의 APFS 클론 사본으로 교체한다 — 데이터 손실 없는 회수.
-/// 각 victim은 교체 직전 재해시로 동일성을 재확인하며, 실패한 항목은 무손상으로
-/// 남는다. 블로킹(해시 IO) — 백그라운드에서 호출.
+/// keep은 배치당 1회만 해시하고, 각 victim은 교체 직전 재해시로 동일성을
+/// 재확인한다. 실패한 항목은 무손상으로 남는다. 블로킹(해시 IO) — 백그라운드에서 호출.
 #[uniffi::export]
 pub fn merge_duplicates(keep: String, victims: Vec<String>) -> MergeResult {
-    let keep = PathBuf::from(keep);
-    let mut merged = 0u32;
-    let mut failed = 0u32;
-    let mut reclaimed = 0u64;
-    for victim in victims {
-        match space_dedup::merge_as_clone(&keep, Path::new(&victim)) {
-            Ok(bytes) => {
-                merged += 1;
-                reclaimed += bytes;
-            }
-            Err(_) => failed += 1,
-        }
-    }
+    let victims: Vec<PathBuf> = victims.into_iter().map(PathBuf::from).collect();
+    let stats = space_dedup::merge_group(Path::new(&keep), &victims);
     MergeResult {
-        merged,
-        failed,
-        reclaimed,
+        merged: stats.merged,
+        failed: stats.failed,
+        reclaimed: stats.reclaimed,
     }
 }
 

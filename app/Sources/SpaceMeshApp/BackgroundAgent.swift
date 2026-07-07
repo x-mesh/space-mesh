@@ -132,6 +132,14 @@ final class BackgroundAgent: ObservableObject {
     private var mustFullRescan = false
     /// 이보다 변경 경로가 많으면 증분 이득이 없다 — 전체 재스캔으로 강등.
     private let incrementalPathLimit = 256
+    /// 감시 설정 세대 — start/stop마다 증가. 감시 대상이 바뀐 뒤 도착한
+    /// 낡은 재집계 결과가 liveHandle을 되살리지 못하게 한다.
+    private var watchGeneration = 0
+    /// 스냅샷 저장 스로틀 (증분마다 전체 트리를 직렬화하면 저장이 재스캔보다 비싸다).
+    private var lastSavedAt: Date?
+    private var unsavedDeltaBytes: Int64 = 0
+    private let saveInterval: TimeInterval = 15 * 60
+    private let saveDeltaThreshold: Int64 = 1 << 30  // 1 GiB
 
     private func startLiveWatch(root: String, budgetGiB: Double) {
         watchRoot = root
@@ -139,6 +147,9 @@ final class BackgroundAgent: ObservableObject {
         liveHandle = nil
         pendingPaths = []
         mustFullRescan = false
+        watchGeneration += 1
+        lastSavedAt = nil
+        unsavedDeltaBytes = 0
 
         var context = FSEventStreamContext(
             version: 0,
@@ -200,6 +211,7 @@ final class BackgroundAgent: ObservableObject {
         liveHandle = nil
         pendingPaths = []
         mustFullRescan = false
+        watchGeneration += 1
     }
 
     /// 이벤트 수신 — 즉시 재집계하지 않고 debounce. IO 폭주 시 오히려 배치가 커져 효율적.
@@ -235,29 +247,56 @@ final class BackgroundAgent: ObservableObject {
         isRecomputing = true
         pendingSince = nil
         let root = watchRoot
+        let generation = watchGeneration
         let changed = Array(pendingPaths)
-        let incremental = liveHandle != nil && !mustFullRescan && !changed.isEmpty
+        var incremental = liveHandle != nil && !mustFullRescan && !changed.isEmpty
         pendingPaths = []
         mustFullRescan = false
 
-        let handle: ScanHandle?
+        var handle: ScanHandle?
         var mode = "전체"
         if incremental, let live = liveHandle {
-            // 변경된 서브트리만 재스캔하고 갱신된 트리를 스냅샷으로 저장 (F2).
-            let ok = await Task.detached(priority: .background) { () -> Bool in
-                guard (try? live.refreshPaths(absPaths: changed, minFileMib: 50)) != nil
-                else { return false }
-                return (try? live.saveToDb(dbPath: AppModel.dbPath)) != nil
+            // 변경된 서브트리만 재스캔 (F2).
+            let summary = try? await Task.detached(priority: .background) {
+                try live.refreshPaths(absPaths: changed, minFileMib: 50)
             }.value
-            handle = ok ? live : nil
-            mode = "증분 \(changed.count)곳"
-        } else {
+            if let summary, summary.refreshedSubtrees > 0 {
+                // 스냅샷 저장은 스로틀 — 증분마다 전체 트리를 직렬화하면
+                // 저장 비용이 재스캔 이득을 압도한다 (15분 또는 누적 1 GiB).
+                unsavedDeltaBytes += summary.deltaAllocated
+                let saveDue =
+                    lastSavedAt.map { Date().timeIntervalSince($0) > saveInterval } ?? true
+                if saveDue || abs(unsavedDeltaBytes) > saveDeltaThreshold {
+                    let saved = await Task.detached(priority: .background) {
+                        (try? live.saveToDb(dbPath: AppModel.dbPath)) != nil
+                    }.value
+                    if saved {
+                        lastSavedAt = Date()
+                        unsavedDeltaBytes = 0
+                    }
+                }
+                handle = live
+                mode = "증분 \(changed.count)곳"
+            } else {
+                // 변경 경로가 하나도 트리에 매칭되지 않았다 (심볼릭 링크 표기
+                // 차이 등) — 조용한 무동작 대신 전체 스캔으로 강등한다.
+                incremental = false
+            }
+        }
+        if !incremental {
             handle = try? await Task.detached(priority: .background) {
                 // 스냅샷도 저장해 '변화' 탭에 축적.
                 try scanAndSave(path: root, minFileMib: 50, dbPath: AppModel.dbPath)
             }.value
+            if handle != nil {
+                lastSavedAt = Date()
+                unsavedDeltaBytes = 0
+            }
         }
         isRecomputing = false
+        // 감시 대상이 바뀐 뒤 도착한 낡은 결과는 버린다 — 이전 루트의 핸들을
+        // 되살리면 이후 증분이 전부 무시되며 성공으로 위장된다.
+        guard generation == watchGeneration else { return }
         guard let handle else {
             // 증분 실패(루트 소실 등)면 다음 재집계는 전체 스캔으로.
             liveHandle = nil

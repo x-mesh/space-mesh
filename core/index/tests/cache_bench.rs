@@ -10,7 +10,15 @@ fn cache_roundtrip_and_invalidation() {
 
     let now = 1_000_000u64;
     // 저장.
-    idx::git_cache_put(&conn, "/a/repo", 111, 222, "danger|branch:main|0|0|1|1|0|0|5|-1", now).unwrap();
+    idx::git_cache_put(
+        &conn,
+        "/a/repo",
+        111,
+        222,
+        "danger|branch:main|0|0|1|1|0|0|5|-1",
+        now,
+    )
+    .unwrap();
 
     // 같은 sig + TTL 이내 → 히트.
     assert!(idx::git_cache_get(&conn, "/a/repo", 111, 222, 3600, now + 100).is_some());

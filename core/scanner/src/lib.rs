@@ -306,22 +306,8 @@ fn apply_delta(node: &mut DirNode, d: &SubtreeDelta) {
     node.newest_mtime = node.newest_mtime.max(d.subtree_newest_mtime);
 }
 
-/// root 트리에서 rel_path 서브트리만 다시 스캔해 교체하고, 조상 체인의
-/// 집계값(logical/allocated/file_count/dir_count)을 델타로 갱신한다.
-///
-/// - rel_path가 트리에 없으면(새 디렉토리 등) 트리에 존재하는 가장 깊은
-///   조상을 재스캔한다 — 그 과정에서 새 하위가 발견된다.
-/// - rel_path가 디스크에서 사라졌으면 해당 노드를 트리에서 제거한다.
-/// - 하드링크는 재스캔 서브트리 안에서만 1회로 접는다. 서브트리 밖과 걸친
-///   하드링크의 전역 정확도는 다음 전체 스캔에서 회복된다 (du와 같은 한계).
-/// - one_filesystem의 기준 device는 재스캔 대상의 device를 쓴다 (같은
-///   볼륨 안에서는 원래 스캔과 동일하게 동작).
-pub fn rescan_subtree(
-    root: &mut DirNode,
-    root_path: &Path,
-    rel_path: &Path,
-    opts: &ScanOptions,
-) -> std::io::Result<SubtreeDelta> {
+/// rel_path를 이름 세그먼트로 검증·분해한다 (절대 경로/`..` 거부).
+pub fn rel_segments(rel_path: &Path) -> std::io::Result<Vec<String>> {
     let mut segments: Vec<String> = Vec::new();
     for comp in rel_path.components() {
         match comp {
@@ -335,36 +321,34 @@ pub fn rescan_subtree(
             }
         }
     }
-    rescan_at(root, root_path, &segments, opts)
+    Ok(segments)
 }
 
-fn rescan_at(
-    node: &mut DirNode,
-    disk_path: &Path,
-    segments: &[String],
-    opts: &ScanOptions,
-) -> std::io::Result<SubtreeDelta> {
-    if let Some((first, rest)) = segments.split_first() {
-        if let Some(pos) = node.children.iter().position(|c| &c.name == first) {
-            let child_disk = disk_path.join(first);
-            match fs::symlink_metadata(&child_disk) {
-                Ok(md) if md.is_dir() => {
-                    let delta = rescan_at(&mut node.children[pos], &child_disk, rest, opts)?;
-                    apply_delta(node, &delta);
-                    return Ok(delta);
-                }
-                // 디스크에서 사라졌거나 더 이상 디렉토리가 아님 → 트리에서 제거.
-                _ => {
-                    let old = node.children.remove(pos);
-                    let delta = SubtreeDelta::removal(&old);
-                    apply_delta(node, &delta);
-                    return Ok(delta);
-                }
+/// 트리에서 segments 중 실제로 존재하는 가장 깊은 접두 경로를 반환한다.
+/// (트리에 없는 새 디렉토리는 이 조상을 재스캔하면 발견된다.)
+pub fn deepest_existing_path(root: &DirNode, segments: &[String]) -> Vec<String> {
+    let mut node = root;
+    let mut names = Vec::new();
+    for seg in segments {
+        match node.children.iter().find(|c| &c.name == seg) {
+            Some(child) => {
+                node = child;
+                names.push(seg.clone());
             }
+            None => break,
         }
-        // 트리에 없는 세그먼트 — 여기(존재하는 가장 깊은 조상)를 재스캔해 새 하위를 발견한다.
     }
+    names
+}
 
+/// 서브트리 하나를 트리와 무관하게 새로 스캔한다 — 락 없이 실행 가능한 단계.
+/// 반환: (새 노드, 스캔 중 건너뛴 항목 수).
+/// 하드링크는 이 서브트리 안에서만 1회로 접는다 (전역 정확도는 다음 전체 스캔에서 회복).
+pub fn scan_subtree(
+    disk_path: &Path,
+    name: String,
+    opts: &ScanOptions,
+) -> std::io::Result<(DirNode, u64)> {
     let md = fs::symlink_metadata(disk_path)?;
     if !md.is_dir() {
         return Err(std::io::Error::new(
@@ -382,11 +366,116 @@ fn rescan_at(
         total_dirs: AtomicU64::new(0),
         progress: None,
     };
-    let fresh = scan_dir(disk_path, node.name.clone(), &md, &ctx);
-    let mut delta = SubtreeDelta::between(node, &fresh);
-    delta.errors = ctx.errors.load(Ordering::Relaxed);
-    *node = fresh;
-    Ok(delta)
+    let node = scan_dir(disk_path, name, &md, &ctx);
+    Ok((node, ctx.errors.load(Ordering::Relaxed)))
+}
+
+/// names 위치의 노드를 fresh(Some=교체, None=제거)로 접합하고 조상 집계를
+/// 델타로 갱신한다 — 쓰기 락이 필요한 짧은 단계. 위치를 찾지 못하면(그 사이
+/// 트리가 바뀜) None을 반환하고 트리는 그대로 둔다.
+pub fn splice_subtree(
+    root: &mut DirNode,
+    names: &[String],
+    fresh: Option<DirNode>,
+) -> Option<SubtreeDelta> {
+    match names.split_first() {
+        None => {
+            // 루트 자신 교체 (루트 제거는 지원하지 않음).
+            let fresh = fresh?;
+            let delta = SubtreeDelta::between(root, &fresh);
+            *root = fresh;
+            Some(delta)
+        }
+        Some((first, rest)) => {
+            let pos = root.children.iter().position(|c| &c.name == first)?;
+            let delta = if rest.is_empty() {
+                match fresh {
+                    Some(fresh) => {
+                        let child = &mut root.children[pos];
+                        let delta = SubtreeDelta::between(child, &fresh);
+                        *child = fresh;
+                        delta
+                    }
+                    None => {
+                        let old = root.children.remove(pos);
+                        SubtreeDelta::removal(&old)
+                    }
+                }
+            } else {
+                splice_subtree(&mut root.children[pos], rest, fresh)?
+            };
+            apply_delta(root, &delta);
+            Some(delta)
+        }
+    }
+}
+
+/// root 트리에서 rel_path 서브트리만 다시 스캔해 교체하고, 조상 체인의
+/// 집계값(logical/allocated/file_count/dir_count)을 델타로 갱신한다.
+///
+/// - rel_path가 트리에 없으면(새 디렉토리 등) 트리에 존재하는 가장 깊은
+///   조상을 재스캔한다 — 그 과정에서 새 하위가 발견된다.
+/// - 디스크에서 사라진 노드는 사라짐이 시작된 최상위 조상부터 제거한다.
+/// - stat이 권한/IO 오류로 실패하면 **삭제로 오인하지 않고** 트리를 유지한
+///   채 errors만 보고한다 (전체 스캔과 동일한 대우).
+/// - one_filesystem의 기준 device는 재스캔 대상의 device를 쓴다.
+pub fn rescan_subtree(
+    root: &mut DirNode,
+    root_path: &Path,
+    rel_path: &Path,
+    opts: &ScanOptions,
+) -> std::io::Result<SubtreeDelta> {
+    let segments = rel_segments(rel_path)?;
+    let names = deepest_existing_path(root, &segments);
+    let disk_path: PathBuf = root_path.join(names.iter().collect::<PathBuf>());
+
+    match fs::symlink_metadata(&disk_path) {
+        Ok(md) if md.is_dir() => {
+            let name = names.last().cloned().unwrap_or_else(|| root.name.clone());
+            let (fresh, errors) = scan_subtree(&disk_path, name, opts)?;
+            let mut delta = splice_subtree(root, &names, Some(fresh)).unwrap_or_default();
+            delta.errors += errors;
+            Ok(delta)
+        }
+        // 사라졌거나 더 이상 디렉토리가 아님 → 사라짐이 시작된 최상위 조상부터 제거.
+        Ok(_) => Ok(remove_missing(root, root_path, &names)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if names.is_empty() {
+                return Err(e); // 스캔 루트 자체가 사라짐 — 호출자가 처리
+            }
+            Ok(remove_missing(root, root_path, &names))
+        }
+        // 권한/IO 등 일시 오류 — 삭제로 오인하면 멀쩡한 서브트리가 통째로
+        // 사라지므로, 트리를 유지하고 에러로만 보고한다.
+        Err(_) => Ok(SubtreeDelta {
+            errors: 1,
+            ..Default::default()
+        }),
+    }
+}
+
+/// names 경로 중 디스크에서 사라진 최상위 조상을 찾아 그 노드를 제거한다.
+/// 중간 조상 검사에서 일시 오류가 나면 아무것도 제거하지 않는다 (보수적).
+/// 조상별 stat 몇 번만 수행하므로 쓰기 락 안에서 호출해도 짧다.
+pub fn remove_missing(root: &mut DirNode, root_path: &Path, names: &[String]) -> SubtreeDelta {
+    for i in 0..names.len() {
+        let prefix = &names[..=i];
+        let p: PathBuf = root_path.join(prefix.iter().collect::<PathBuf>());
+        match fs::symlink_metadata(&p) {
+            Ok(md) if md.is_dir() => continue,
+            Ok(_) => return splice_subtree(root, prefix, None).unwrap_or_default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return splice_subtree(root, prefix, None).unwrap_or_default();
+            }
+            Err(_) => {
+                return SubtreeDelta {
+                    errors: 1,
+                    ..Default::default()
+                };
+            }
+        }
+    }
+    SubtreeDelta::default()
 }
 
 /// JSON 직렬화 전에 트리를 max_depth까지만 남기고 잘라낸다 (집계값은 유지).
@@ -536,6 +625,27 @@ mod tests {
         let delta = rescan_subtree(&mut result.root, &tmp, Path::new("gone"), &opts).unwrap();
         assert!(delta.logical <= -30_000);
         assert!(result.root.children.iter().all(|c| c.name != "gone"));
+
+        let full = scan(&tmp, opts).unwrap();
+        assert_tree_eq(&result.root, &full.root);
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn rescan_subtree_removes_topmost_missing_ancestor() {
+        let tmp = std::env::temp_dir().join(format!("space-mesh-rmanc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("a/b/c")).unwrap();
+        write_file(&tmp.join("a/b/c/x.bin"), 10_000);
+        write_file(&tmp.join("keep.bin"), 1_000);
+
+        let opts = ScanOptions::default();
+        let mut result = scan(&tmp, opts.clone()).unwrap();
+
+        // a 전체가 사라졌는데 이벤트는 깊은 경로(a/b/c)로 들어온 경우 —
+        // c만이 아니라 사라짐이 시작된 a부터 제거되어야 한다.
+        fs::remove_dir_all(tmp.join("a")).unwrap();
+        rescan_subtree(&mut result.root, &tmp, Path::new("a/b/c"), &opts).unwrap();
 
         let full = scan(&tmp, opts).unwrap();
         assert_tree_eq(&result.root, &full.root);

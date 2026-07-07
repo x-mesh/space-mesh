@@ -82,12 +82,6 @@ final class ReclaimPlan: ObservableObject {
         report = nil
         message = nil
 
-        let estimated = targets.reduce(UInt64(0)) { $0 + $1.estimatedBytes }
-        let rootPath = appModel.scannedRoot.isEmpty ? NSHomeDirectory() : appModel.scannedRoot
-        lastLogId = try? reclaimLogAdd(
-            dbPath: AppModel.dbPath, rootPath: rootPath,
-            itemCount: UInt64(targets.count), estimated: estimated)
-
         // 휴지통 이동 — 안전 가드는 즉시 삭제 경로와 동일하게 적용.
         var batch: [TrashRecord] = []
         var skipped = 0
@@ -114,9 +108,19 @@ final class ReclaimPlan: ObservableObject {
         let movedPaths = Set(batch.map(\.original))
         items.removeAll { movedPaths.contains($0.path) }
 
+        // 예상치는 실제로 이동된 항목 기준 — 보호/실패로 건너뛴 항목이
+        // 예상 vs 실측 비교를 부풀리지 않게 한다.
+        let estimated = batch.reduce(UInt64(0)) { $0 + $1.size }
+        let rootPath = appModel.scannedRoot.isEmpty ? NSHomeDirectory() : appModel.scannedRoot
+        lastLogId = batch.isEmpty
+            ? nil
+            : try? reclaimLogAdd(
+                dbPath: AppModel.dbPath, rootPath: rootPath,
+                itemCount: UInt64(batch.count), estimated: estimated)
+
         let skippedCount = skipped
         let logId = lastLogId
-        verify(parentsOf: batch.map(\.original), appModel: appModel) { measured in
+        verify(itemPaths: batch.map(\.original), appModel: appModel) { measured in
             if let logId, let measured {
                 try? reclaimLogSetMeasured(
                     dbPath: AppModel.dbPath, id: logId, measured: measured)
@@ -126,6 +130,7 @@ final class ReclaimPlan: ObservableObject {
                 estimated: estimated, measured: measured)
             if batch.isEmpty {
                 self.message = "이동한 항목이 없습니다 (\(skippedCount)개 보호됨/실패)"
+                self.report = nil
             }
             self.isExecuting = false
         }
@@ -147,31 +152,49 @@ final class ReclaimPlan: ObservableObject {
         if let logId = lastLogId {
             try? reclaimLogSetUndone(dbPath: AppModel.dbPath, id: logId)
         }
-        let parents = lastBatch.map(\.original)
+        let restoredPaths = lastBatch.map(\.original)
         lastBatch = []
         report = nil
         message = "복원: \(restored)개"
-        verify(parentsOf: parents, appModel: appModel) { _ in }
+        verify(itemPaths: restoredPaths, appModel: appModel) { _ in }
     }
 
-    /// 영향받은 부모 디렉토리만 증분 재스캔해 실측치를 콜백으로 넘긴다.
-    /// 핸들이 없거나(스캔 전) 경로가 비면 nil로 즉시 완료.
+    /// 이동/복원된 항목 경로 자체를 증분 재스캔해 실측치를 콜백으로 넘긴다.
+    /// 항목 경로를 그대로 넘기면 삭제가 노드 제거로 관측되고, 부모 전체를
+    /// 다시 훑는 낭비와 왜곡(~/.Trash 재계상)을 피한다.
+    ///
+    /// 측정 불가 조건에서는 0 대신 nil을 넘긴다 (리뷰 지적 — 가짜 '실측 0' 방지):
+    /// - 스캔 루트 밖 항목 ($HOME 기준 룰 후보 등)
+    /// - 스캔 루트 직속 항목 (부모가 루트라 전체 재스캔이 ~/.Trash 증가를 함께 셈)
+    /// - 일부만 측정 가능한 혼합 배치 (부분 실측은 오해를 부른다)
     private func verify(
-        parentsOf paths: [String], appModel: AppModel,
+        itemPaths paths: [String], appModel: AppModel,
         completion: @escaping @MainActor (Int64?) -> Void
     ) {
-        let parents = Array(Set(paths.map { ($0 as NSString).deletingLastPathComponent }))
-        guard let handle = appModel.handle, !parents.isEmpty else {
+        let root = appModel.scannedRoot
+        let measurable = paths.filter {
+            !root.isEmpty && $0.hasPrefix(root + "/")
+                && ($0 as NSString).deletingLastPathComponent != root
+        }
+        guard let handle = appModel.handle,
+            !measurable.isEmpty,
+            measurable.count == paths.count
+        else {
             completion(nil)
             return
         }
         Task {
             let summary = try? await Task.detached(priority: .userInitiated) {
-                try handle.refreshPaths(absPaths: parents, minFileMib: 50)
+                try handle.refreshPaths(absPaths: measurable, minFileMib: 50)
             }.value
-            appModel.reload()
+            // 트리가 변형됐으므로 저장된 인덱스 경로를 이름 기준으로 재검증.
+            appModel.revalidatePath()
+            guard let summary, summary.refreshedSubtrees > 0 else {
+                completion(nil)
+                return
+            }
             // 음수 delta = 트리가 줄었다 = 회수됨. 측정값은 회수량(양수)으로 뒤집는다.
-            completion(summary.map { -$0.deltaAllocated })
+            completion(-summary.deltaAllocated)
         }
     }
 }
