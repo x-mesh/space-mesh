@@ -13,6 +13,42 @@ struct ScanningView: View {
     private let sweepPeriod: Double = 2.4
     private let blipCount = 26
 
+    /// 스캔 대기 시간에 순차로 보여주는 기능 힌트 — 설정에 숨은 기능의 발견 통로.
+    private static let tips: [(title: String, body: String)] = [
+        (
+            "앱을 꺼도 감시할 수 있습니다",
+            "우상단 ⚙︎ 설정에서 '주기 스냅샷'을 켜면 launchd가 조용히 스캔을 쌓아 '변화' 탭이 시간축으로 채워집니다. 상주 없음, 저전력 IO."
+        ),
+        (
+            "디스크가 갑자기 불어나면 알림",
+            "설정의 '실시간 감시' 모드는 급증(기본 5GiB)을 감지하면 주범 경로와 함께 macOS 알림을 보냅니다. 재집계는 변경분만 다시 읽어 1초 안에 끝납니다."
+        ),
+        (
+            "크고 잊힌 파일 사냥",
+            "회수 그룹의 '미수정 180일+' — 옛 dmg·ISO·백업처럼 오래 수정 없던 대용량 파일을 크기×경과일 순으로 랭킹합니다."
+        ),
+        (
+            "뭐가 늘었는지 범인 추적",
+            "'변화' 탭은 두 스냅샷을 비교해 증가·감소를 디렉토리별로 귀속합니다. 스캔할 때마다 스냅샷이 자동 저장됩니다."
+        ),
+        (
+            "중복 정리는 클릭 한 번",
+            "중복 검색 결과의 첫 파일은 최신 수정본(보존 추천)입니다. '추천본만 남기고 모두 선택' 버튼이면 정리 준비 끝."
+        ),
+        (
+            "지우기 전에 Git부터",
+            "안전 그룹의 Git 뷰는 미푸시 커밋·미커밋 변경이 있는 repo를 위험도로 표시합니다. 산출물 정리 전 확인용."
+        ),
+        (
+            "터미널에서도 씁니다",
+            "space-mesh ~ --ncdu > snap.json 후 ncdu -f snap.json. --dups --json, --categories --json으로 스크립팅도 됩니다."
+        ),
+        (
+            "모든 삭제는 되돌릴 수 있습니다",
+            "이 앱은 영구 삭제를 하지 않습니다 — 항상 휴지통 경유이고, 이동 직후엔 '되돌리기' 버튼도 있습니다."
+        ),
+    ]
+
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
             let elapsed = max(0, timeline.date.timeIntervalSince(startedAt))
@@ -47,10 +83,37 @@ struct ScanningView: View {
                         InstrumentLabel(text: unit)
                     }
                 }
+
+                hintCard(elapsed: elapsed)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Theme.bg)
+    }
+
+    /// 8초마다 다음 힌트로 크로스페이드하는 기능 안내 카드.
+    private func hintCard(elapsed: Double) -> some View {
+        let idx = Int(elapsed / 8.0) % Self.tips.count
+        let tip = Self.tips[idx]
+        return VStack(spacing: 6) {
+            InstrumentLabel(text: "TIP \(idx + 1)/\(Self.tips.count)")
+            Text(tip.title)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(Theme.text)
+            Text(tip.body)
+                .font(.system(size: 11.5))
+                .foregroundStyle(Theme.textDim)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .lineSpacing(2)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+        .frame(maxWidth: 460)
+        .background(Theme.panel, in: RoundedRectangle(cornerRadius: 8))
+        .id(idx)
+        .transition(.opacity)
+        .animation(.easeOut(duration: 0.5), value: idx)
     }
 
     // MARK: - 레이더 요소

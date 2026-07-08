@@ -21,6 +21,8 @@ final class AppModel: ObservableObject {
     /// 회수 가능 합계 (툴바 상시 노출용, git 조회 없는 경량 계산).
     @Published var reclaimSummary: ReclaimSummary?
     @Published var stats: ScanStatsInfo?
+    /// 루트 전체가 점유한 allocated 총량 — 상단 헤드라인 리드아웃(드릴다운과 무관하게 고정).
+    @Published var rootAllocated: UInt64 = 0
     @Published var scanSeconds: Double?
     @Published var scanStartedAt = Date()
     /// 마지막으로 스캔한 루트 경로 (카테고리 뷰의 캐시 무효화 기준).
@@ -41,6 +43,7 @@ final class AppModel: ObservableObject {
                 self.scanSeconds = Date().timeIntervalSince(started)
                 self.indexPath = []
                 self.breadcrumb = []
+                self.rootAllocated = (try? handle.nodeAt(indexPath: []).allocatedSize) ?? 0
                 self.staleFiles = handle.staleFiles(limit: 20, minAgeDays: Self.staleAgeDays)
                 self.reclaimSummary = await Task.detached(priority: .utility) {
                     handle.reclaimSummary()
@@ -113,6 +116,17 @@ final class AppModel: ObservableObject {
 
     func fullPath(of node: NodeInfo) -> String? {
         try? handle?.fullPath(indexPath: indexPath + [node.index])
+    }
+
+    /// 방치 대용량 목록 재계산 (StaleView 새로고침 — 트리 상주라 즉시).
+    func refreshStale() {
+        guard let handle else { return }
+        staleFiles = handle.staleFiles(limit: 50, minAgeDays: Self.staleAgeDays)
+    }
+
+    /// 휴지통 이동 직후 목록에서 제거 (다음 스캔 전까지의 로컬 반영).
+    func removeStale(paths: Set<String>) {
+        staleFiles.removeAll { paths.contains($0.path) }
     }
 }
 

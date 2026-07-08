@@ -3,39 +3,66 @@ import QuickLook
 import SpaceMeshCore
 import SwiftUI
 
-enum ViewMode: String, CaseIterable {
-    case treemap = "트리맵"
-    case changes = "변화"
-    case categories = "빌드 산출물"
-    case git = "Git"
-    case cleanup = "정리"
-    case duplicates = "중복"
+/// 사이드바 항목 — 유저 job(진단 → 회수 → 안전) 기준 3그룹.
+enum SidebarItem: String, CaseIterable, Identifiable {
+    // 진단: 어디가 크고, 뭐가 늘었나
+    case treemap, changes
+    // 회수: 뭘 지울까
+    case categories, duplicates, stale, cleanup
+    // 안전: 지워도 되나
+    case git
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .treemap: return "트리맵"
+        case .changes: return "변화"
+        case .categories: return "빌드 산출물"
+        case .duplicates: return "중복"
+        case .stale: return "미수정 180일+"
+        case .cleanup: return "캐시·도구"
+        case .git: return "Git"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .treemap: return "square.grid.3x3.topleft.filled"
+        case .changes: return "clock.arrow.circlepath"
+        case .categories: return "hammer"
+        case .duplicates: return "doc.on.doc"
+        case .stale: return "clock.badge.exclamationmark"
+        case .cleanup: return "sparkles"
+        case .git: return "arrow.triangle.branch"
+        }
+    }
 }
+
+/// 사이드바 그룹 정의 (표시 순서 고정).
+private let sidebarGroups: [(title: String, items: [SidebarItem])] = [
+    ("진단", [.treemap, .changes]),
+    ("회수", [.categories, .duplicates, .stale, .cleanup]),
+    ("안전", [.git]),
+]
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @StateObject private var cleanup = CleanupModel()
     @State private var scanTarget = NSHomeDirectory()
     @State private var previewURL: URL?
-    @State private var mode: ViewMode = .treemap
+    @State private var selection: SidebarItem = .treemap
 
     var body: some View {
         VStack(spacing: 0) {
             toolbar
             Rectangle().fill(Theme.border).frame(height: 1)
-            switch mode {
-            case .treemap:
-                treemapSection
-            case .changes:
-                ChangesView(scanTarget: scanTarget)
-            case .categories:
-                CategoriesView(model: cleanup, scanTarget: scanTarget)
-            case .git:
-                GitView(scanTarget: scanTarget)
-            case .cleanup:
-                CleanupView(model: cleanup)
-            case .duplicates:
-                DuplicatesView(model: cleanup, defaultRoot: scanTarget)
+            HStack(spacing: 0) {
+                sidebarNav
+                    .frame(width: 210)
+                Rectangle().fill(Theme.border).frame(width: 1)
+                detail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .background(Theme.bg)
@@ -45,19 +72,137 @@ struct ContentView: View {
     }
 
     @ViewBuilder
+    private var detail: some View {
+        switch selection {
+        case .treemap:
+            treemapSection
+        case .changes:
+            ChangesView(scanTarget: scanTarget)
+        case .categories:
+            CategoriesView(model: cleanup, scanTarget: scanTarget)
+        case .git:
+            GitView(scanTarget: scanTarget)
+        case .cleanup:
+            CleanupView(model: cleanup)
+        case .duplicates:
+            DuplicatesView(model: cleanup, defaultRoot: scanTarget)
+        case .stale:
+            StaleView(cleanup: cleanup)
+        }
+    }
+
+    // MARK: - 사이드바 (job 단계: 진단 → 회수 → 안전)
+
+    private var sidebarNav: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(sidebarGroups, id: \.title) { group in
+                HStack(spacing: 6) {
+                    InstrumentLabel(text: group.title)
+                    Spacer()
+                    // 회수 그룹 헤더 = 상시 지표 (안전 회수 가능 합계).
+                    if group.title == "회수", let reclaim = model.reclaimSummary,
+                        reclaim.safeTotal > 0
+                    {
+                        Text(humanBytes(reclaim.safeTotal))
+                            .font(.dataCell)
+                            .foregroundStyle(Theme.accent)
+                            .help("안전 회수 가능 합계 — 빌드 산출물 \(reclaim.hitCount)곳")
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 18)
+                .padding(.bottom, 6)
+                ForEach(group.items) { item in
+                    sidebarRow(item)
+                }
+            }
+            Spacer()
+            // 스캔 중에는 어느 뷰에 있든 진행 상황을 왼쪽 아래에 상시 표시.
+            if model.isScanning {
+                scanFooter
+            }
+        }
+        .background(Theme.panel)
+    }
+
+    /// 사이드바 하단 스캔 진행 인디케이터 — 클릭하면 레이더 화면으로 복귀.
+    private var scanFooter: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
+            let elapsed = max(0, timeline.date.timeIntervalSince(model.scanStartedAt))
+            Button {
+                selection = .treemap
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        InstrumentLabel(text: "스캔 중")
+                        Spacer()
+                    }
+                    Text("\(scanProgress().formatted()) files")
+                        .font(.dataCell)
+                        .foregroundStyle(Theme.text)
+                        .contentTransition(.numericText())
+                    Text(String(format: "%.0fs 경과", elapsed))
+                        .font(.pathCell)
+                        .foregroundStyle(Theme.textFaint)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.raised, in: RoundedRectangle(cornerRadius: 6))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+            .help("스캔 진행 중 — 클릭하면 진행 화면으로 이동")
+        }
+    }
+
+    private func sidebarRow(_ item: SidebarItem) -> some View {
+        let selected = selection == item
+        return Button {
+            selection = item
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: item.icon)
+                    .font(.system(size: 12))
+                    .frame(width: 18)
+                    .foregroundStyle(selected ? Theme.accent : Theme.textDim)
+                Text(item.title)
+                    .font(.system(size: 12.5, weight: selected ? .semibold : .regular))
+                    .foregroundStyle(selected ? Theme.text : Theme.textDim)
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                selected ? Theme.accentSoft : .clear,
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+    }
+
+    @ViewBuilder
     private var treemapSection: some View {
         if model.isScanning {
             ScanningView(startedAt: model.scanStartedAt, label: "스캔 중")
         } else if model.handle == nil {
             emptyState
         } else {
-            breadcrumbBar
-            Rectangle().fill(Theme.border).frame(height: 1)
-            HSplitView {
-                TreemapView()
-                    .frame(minWidth: 480)
-                sidebar
-                    .frame(minWidth: 260, maxWidth: 380)
+            // VStack 필수 — detail이 바깥 HStack 안에 있어, 감싸지 않으면
+            // breadcrumb·divider·treemap이 가로로 나열된다.
+            VStack(spacing: 0) {
+                breadcrumbBar
+                Rectangle().fill(Theme.border).frame(height: 1)
+                HSplitView {
+                    TreemapView()
+                        .frame(minWidth: 480)
+                    sidebar
+                        .frame(minWidth: 260, maxWidth: 380)
+                }
             }
         }
     }
@@ -95,7 +240,7 @@ struct ContentView: View {
             .frame(maxWidth: 340)
 
             Button {
-                mode = .treemap
+                selection = .treemap
                 model.startScan(path: scanTarget)
             } label: {
                 Text("SCAN")
@@ -113,34 +258,15 @@ struct ContentView: View {
             .keyboardShortcut(.return, modifiers: .command)
             .disabled(model.isScanning)
 
-            ModeTabs(mode: $mode)
-
             Spacer()
 
             if let stats = model.stats, let secs = model.scanSeconds, !model.isScanning {
-                HStack(spacing: 12) {
-                    // Reclaimable now — 회수 가능 합계 상시 노출, 클릭 시 산출물 탭으로.
-                    if let reclaim = model.reclaimSummary, reclaim.safeTotal > 0 {
-                        Button {
-                            mode = .categories
-                        } label: {
-                            VStack(alignment: .trailing, spacing: 0) {
-                                Text(humanBytes(reclaim.safeTotal))
-                                    .font(.dataCell)
-                                    .foregroundStyle(Theme.accent)
-                                Text("RECLAIM")
-                                    .font(.system(size: 7.5, weight: .semibold))
-                                    .tracking(1.0)
-                                    .foregroundStyle(Theme.textFaint)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                        .help(
-                            "안전 회수 가능 합계 (빌드 산출물 \(reclaim.hitCount)곳"
-                                + (reclaim.warnTotal > 0
-                                    ? ", 검토 필요 \(humanBytes(reclaim.warnTotal)) 별도" : "")
-                                + ") — 클릭해 이동")
-                    }
+                HStack(spacing: 14) {
+                    // 총 사용량 — 헤드라인. 나머지 통계보다 밝고 크게.
+                    readoutItem(
+                        value: humanBytes(model.rootAllocated), label: "USED",
+                        emphasized: true)
+                    Rectangle().fill(Theme.border).frame(width: 1, height: 22)
                     readoutItem(value: stats.totalFiles.formatted(), label: "FILES")
                     readoutItem(value: stats.totalDirs.formatted(), label: "DIRS")
                     readoutItem(value: String(format: "%.1fs", secs), label: "SCAN")
@@ -166,15 +292,20 @@ struct ContentView: View {
         .background(Theme.panel)
     }
 
-    private func readoutItem(value: String, label: String) -> some View {
+    private func readoutItem(value: String, label: String, emphasized: Bool = false)
+        -> some View
+    {
         VStack(alignment: .trailing, spacing: 0) {
             Text(value)
-                .font(.dataCell)
-                .foregroundStyle(Theme.textDim)
+                .font(
+                    emphasized
+                        ? .system(size: 14, weight: .semibold, design: .monospaced) : .dataCell
+                )
+                .foregroundStyle(emphasized ? Theme.text : Theme.textDim)
             Text(label)
                 .font(.system(size: 7.5, weight: .semibold))
                 .tracking(1.0)
-                .foregroundStyle(Theme.textFaint)
+                .foregroundStyle(emphasized ? Theme.textDim : Theme.textFaint)
         }
     }
 
@@ -192,7 +323,7 @@ struct ContentView: View {
                 Text("디스크가 어디에 쓰이고 있는지 확인하세요")
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(Theme.text)
-                Text("경로를 정하고 SCAN — 트리맵으로 탐색하고, 빌드 산출물·정리·중복 탭에서 회수합니다")
+                Text("경로를 정하고 SCAN — 진단에서 탐색하고, 회수 그룹에서 공간을 되찾습니다")
                     .font(.callout)
                     .foregroundStyle(Theme.textDim)
             }
@@ -219,6 +350,7 @@ struct ContentView: View {
             }
             Spacer()
             if let node = model.currentNode {
+                InstrumentLabel(text: model.breadcrumb.isEmpty ? "전체" : "이 폴더")
                 Text(humanBytes(node.allocatedSize))
                     .font(.dataCell)
                     .foregroundStyle(Theme.accent)
@@ -319,52 +451,6 @@ struct ContentView: View {
                     InstrumentLabel(text: "대용량 파일 · 직속")
                 }
             }
-            if !model.staleFiles.isEmpty {
-                Section {
-                    ForEach(model.staleFiles, id: \.path) { file in
-                        HStack(spacing: 8) {
-                            Image(systemName: "clock.badge.exclamationmark")
-                                .font(.system(size: 10))
-                                .foregroundStyle(Theme.warn)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text((file.path as NSString).lastPathComponent)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Theme.text)
-                                    .lineLimit(1)
-                                Text((file.path as NSString).deletingLastPathComponent)
-                                    .font(.pathCell)
-                                    .foregroundStyle(Theme.textFaint)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            VStack(alignment: .trailing, spacing: 1) {
-                                Text(humanBytes(file.allocatedSize))
-                                    .font(.dataCell)
-                                    .foregroundStyle(Theme.textDim)
-                                if let age = ageDaysLabel(file.modifiedEpoch) {
-                                    Text(age)
-                                        .font(.pathCell)
-                                        .foregroundStyle(Theme.warn)
-                                }
-                            }
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            previewURL = URL(fileURLWithPath: file.path)
-                        }
-                        .contextMenu {
-                            Button("Finder에서 보기") {
-                                NSWorkspace.shared.activateFileViewerSelecting(
-                                    [URL(fileURLWithPath: file.path)])
-                            }
-                        }
-                        .listRowBackground(Theme.bg)
-                    }
-                } header: {
-                    InstrumentLabel(
-                        text: "방치 대용량 · \(AppModel.staleAgeDays)일+ · 크기×방치일 순")
-                }
-            }
         }
         .listStyle(.inset)
         .scrollContentBackground(.hidden)
@@ -372,30 +458,3 @@ struct ContentView: View {
     }
 }
 
-/// 계기판 스타일 모드 전환 탭 — 대문자 라벨 + 앰버 언더라인.
-struct ModeTabs: View {
-    @Binding var mode: ViewMode
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(ViewMode.allCases, id: \.self) { m in
-                Button {
-                    mode = m
-                } label: {
-                    VStack(spacing: 4) {
-                        Text(m.rawValue)
-                            .font(.system(size: 11, weight: mode == m ? .bold : .medium))
-                            .foregroundStyle(mode == m ? Theme.text : Theme.textDim)
-                        Rectangle()
-                            .fill(mode == m ? Theme.accent : .clear)
-                            .frame(height: 2)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.top, 4)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-}
