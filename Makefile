@@ -78,12 +78,16 @@ test: core-test selftest ## 전체 테스트 (Rust + Swift selftest)
 # ─────────────────────────── 품질 ───────────────────────────
 
 .PHONY: fmt
-fmt: ## Rust 포맷
-	$(CARGO) fmt --manifest-path $(CORE_MANIFEST)
+fmt: ## Rust 포맷 (cargo fmt은 --manifest-path 미지원 → cd 필요)
+	cd $(CORE) && $(CARGO) fmt
+
+.PHONY: fmt-check
+fmt-check: ## 포맷 diff만 확인 (CI용, 미적용)
+	cd $(CORE) && $(CARGO) fmt --check
 
 .PHONY: clippy
-clippy: ## Rust 린트
-	$(CARGO) clippy $(CARGO_FLAGS) --manifest-path $(CORE_MANIFEST) -- -D warnings
+clippy: ## Rust 린트 (전체 타깃, 경고=에러)
+	cd $(CORE) && $(CARGO) clippy $(CARGO_FLAGS) --all-targets -- -D warnings
 
 .PHONY: check
 check: fmt clippy core-test ## 포맷 + 린트 + 테스트
