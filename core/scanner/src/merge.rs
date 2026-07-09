@@ -295,12 +295,24 @@ mod tests {
         assert_eq!(a.allocated_size, b.allocated_size, "allocated @ {path}");
         assert_eq!(a.file_count, b.file_count, "file_count @ {path}");
         assert_eq!(a.dir_count, b.dir_count, "dir_count @ {path}");
-        let mut bf_a: Vec<_> = a.big_files.iter().map(|f| (&f.path, f.allocated_size)).collect();
-        let mut bf_b: Vec<_> = b.big_files.iter().map(|f| (&f.path, f.allocated_size)).collect();
+        let mut bf_a: Vec<_> = a
+            .big_files
+            .iter()
+            .map(|f| (&f.path, f.allocated_size))
+            .collect();
+        let mut bf_b: Vec<_> = b
+            .big_files
+            .iter()
+            .map(|f| (&f.path, f.allocated_size))
+            .collect();
         bf_a.sort();
         bf_b.sort();
         assert_eq!(bf_a, bf_b, "big_files @ {path}");
-        assert_eq!(a.children.len(), b.children.len(), "children count @ {path}");
+        assert_eq!(
+            a.children.len(),
+            b.children.len(),
+            "children count @ {path}"
+        );
         for ca in &a.children {
             let cb = b
                 .children
@@ -456,7 +468,9 @@ mod tests {
         // 결정적 LCG (외부 의존성 없이 재현 가능).
         let mut seed: u64 = 0xDEAD_BEEF_1234_5678;
         let mut rng = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as usize
         };
 
@@ -541,8 +555,14 @@ mod tests {
             // 주의: 교차 디렉토리 하드링크 그룹의 디렉토리별 귀속은 풀스캔끼리도
             // rayon 순서에 따라 비결정적(기존 동작) — 제품 보장은 총량 동등이다.
             let full = scan(&tmp, opts()).unwrap();
-            assert_eq!(root.logical_size, full.root.logical_size, "logical step {step}");
-            assert_eq!(root.allocated_size, full.root.allocated_size, "alloc step {step}");
+            assert_eq!(
+                root.logical_size, full.root.logical_size,
+                "logical step {step}"
+            );
+            assert_eq!(
+                root.allocated_size, full.root.allocated_size,
+                "alloc step {step}"
+            );
             assert_eq!(root.file_count, full.root.file_count, "files step {step}");
             assert_eq!(root.dir_count, full.root.dir_count, "dirs step {step}");
             assert_eq!(stats.total_files, full.stats.total_files, "step {step}");
@@ -565,7 +585,13 @@ mod tests {
         fs::hard_link(tmp.join("a/orig.bin"), tmp.join("b/link.bin")).unwrap();
 
         let base = scan(&tmp, opts()).unwrap();
-        let owner_in_a = base.hardlinks.values().next().unwrap().path.starts_with(tmp.join("a"));
+        let owner_in_a = base
+            .hardlinks
+            .values()
+            .next()
+            .unwrap()
+            .path
+            .starts_with(tmp.join("a"));
         let mut root = base.root.clone();
         let mut stats = base.stats;
         let mut registry = base.hardlinks.clone();

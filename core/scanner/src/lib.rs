@@ -396,12 +396,7 @@ pub fn stale_score(f: &FileEntry, now_epoch: i64) -> u128 {
 
 /// 트리 전체에서 "크고 오래 방치된" 파일 top-N (점수 내림차순).
 /// mtime을 모르거나(0) min_age_days 미만인 파일은 제외한다.
-pub fn stale_files(
-    root: &DirNode,
-    n: usize,
-    min_age_days: u64,
-    now_epoch: i64,
-) -> Vec<FileEntry> {
+pub fn stale_files(root: &DirNode, n: usize, min_age_days: u64, now_epoch: i64) -> Vec<FileEntry> {
     let mut all = Vec::new();
     collect_files(root, &mut all);
     all.retain(|f| {
@@ -522,7 +517,11 @@ mod tests {
         let stale = stale_files(&result.root, 10, 30, now);
         assert_eq!(stale.len(), 2, "{:?}", stale);
         // old-small: 60KB×400d = 24M, old-big: 90KB×200d = 18M → old-small이 1위.
-        assert!(stale[0].path.ends_with("old-small.bin"), "{:?}", stale[0].path);
+        assert!(
+            stale[0].path.ends_with("old-small.bin"),
+            "{:?}",
+            stale[0].path
+        );
         assert!(stale[1].path.ends_with("old-big.bin"));
         assert!(stale[0].modified_epoch > 0);
         assert!(age_days(stale[0].modified_epoch, now) >= 399);

@@ -23,7 +23,7 @@ fn main() {
         e.1 += h.allocated_size;
     }
     let mut rows: Vec<_> = by_cat.into_iter().collect();
-    rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1 .1));
 
     println!(
         "scan {:.1}s + categorize {:.3}s — {} hits",
@@ -32,7 +32,12 @@ fn main() {
         hits.len()
     );
     for (id, (count, size)) in rows {
-        println!("{:>10.1} MiB  {:>4}곳  {}", size as f64 / 1048576.0, count, id);
+        println!(
+            "{:>10.1} MiB  {:>4}곳  {}",
+            size as f64 / 1048576.0,
+            count,
+            id
+        );
     }
     let unverified = hits.iter().filter(|h| !h.verified).count();
     println!("unverified: {}", unverified);

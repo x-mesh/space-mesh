@@ -294,8 +294,12 @@ mod tests {
         fs::write(tmp.join("z-newest.bin"), &content).unwrap();
         let day = std::time::Duration::from_secs(86_400);
         let set_age = |name: &str, days: u32| {
-            let f = fs::File::options().write(true).open(tmp.join(name)).unwrap();
-            f.set_modified(std::time::SystemTime::now() - day * days).unwrap();
+            let f = fs::File::options()
+                .write(true)
+                .open(tmp.join(name))
+                .unwrap();
+            f.set_modified(std::time::SystemTime::now() - day * days)
+                .unwrap();
         };
         set_age("a-old.bin", 100);
         set_age("m-older.bin", 300);

@@ -88,7 +88,11 @@ pub fn parse_docker_df(output: &str) -> Option<u64> {
             seen = true;
         }
     }
-    if seen { Some(total) } else { None }
+    if seen {
+        Some(total)
+    } else {
+        None
+    }
 }
 
 fn brew_advice() -> Option<ToolAdvice> {
@@ -192,8 +196,13 @@ fn pip_advice() -> Option<ToolAdvice> {
 
 /// 설치된 도구들의 공식 정리 커맨드 제안 (병렬 조회, 실행은 안 함).
 pub fn advise() -> Vec<ToolAdvice> {
-    let probes: Vec<fn() -> Option<ToolAdvice>> =
-        vec![brew_advice, docker_advice, simctl_advice, pnpm_advice, pip_advice];
+    let probes: Vec<fn() -> Option<ToolAdvice>> = vec![
+        brew_advice,
+        docker_advice,
+        simctl_advice,
+        pnpm_advice,
+        pip_advice,
+    ];
     let mut advices: Vec<ToolAdvice> = probes.par_iter().filter_map(|f| f()).collect();
     advices.sort_by(|a, b| {
         b.estimated_reclaim

@@ -388,10 +388,9 @@ pub fn prune_snapshots(
         let mut stmt = tx.prepare(
             "SELECT id FROM scans WHERE root_path = ?1 ORDER BY id DESC LIMIT -1 OFFSET ?2",
         )?;
-        let rows = stmt.query_map(
-            params![root_path.to_string_lossy(), keep as i64],
-            |r| r.get(0),
-        )?;
+        let rows = stmt.query_map(params![root_path.to_string_lossy(), keep as i64], |r| {
+            r.get(0)
+        })?;
         rows.collect::<Result<_, _>>()?
     };
     for id in &old_ids {
@@ -434,10 +433,7 @@ pub fn diff_snapshots(
 /// 이미 로드된 두 트리의 diff — 반복 조회(drilldown) 시 트리를 상주시켜 재사용한다.
 pub fn diff_trees(old: Option<&DirNode>, new: Option<&DirNode>, min_delta: u64) -> Vec<DiffEntry> {
     let mut out = Vec::new();
-    let root_name = new
-        .or(old)
-        .map(|n| n.name.clone())
-        .unwrap_or_default();
+    let root_name = new.or(old).map(|n| n.name.clone()).unwrap_or_default();
     attribute(old, new, &root_name, min_delta as i64, &mut out);
     out.sort_by_key(|f| std::cmp::Reverse(f.delta.abs()));
     out
@@ -475,7 +471,11 @@ fn attribute(
             new_children.insert(c.name.as_str(), c);
         }
     }
-    let mut names: Vec<&str> = old_children.keys().chain(new_children.keys()).copied().collect();
+    let mut names: Vec<&str> = old_children
+        .keys()
+        .chain(new_children.keys())
+        .copied()
+        .collect();
     names.sort_unstable();
     names.dedup();
 
@@ -537,7 +537,11 @@ mod diff_tests {
         let entries = diff_snapshots(&conn, id1, id2, 100_000).unwrap();
         assert_eq!(entries.len(), 1, "{:?}", entries);
         // 범인은 최상위가 아니라 실제 변화가 생긴 깊은 디렉토리로 귀속되어야 한다.
-        assert!(entries[0].path.ends_with("growing/deep"), "{}", entries[0].path);
+        assert!(
+            entries[0].path.ends_with("growing/deep"),
+            "{}",
+            entries[0].path
+        );
         assert!(entries[0].delta >= 500_000);
 
         // 목록/개별 로드도 확인.
@@ -615,7 +619,13 @@ pub fn git_cache_put(
          ON CONFLICT(repo_path) DO UPDATE SET
            git_sig=excluded.git_sig, tree_sig=excluded.tree_sig,
            health_json=excluded.health_json, computed_at=excluded.computed_at",
-        rusqlite::params![repo_path, git_sig as i64, tree_sig as i64, health_json, now_secs as i64],
+        rusqlite::params![
+            repo_path,
+            git_sig as i64,
+            tree_sig as i64,
+            health_json,
+            now_secs as i64
+        ],
     )?;
     Ok(())
 }

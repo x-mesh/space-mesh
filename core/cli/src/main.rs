@@ -309,15 +309,12 @@ fn ncdu_node(node: &DirNode, min_file_mib: u64) -> serde_json::Value {
 /// 중복 파일 그룹 — 첫 파일 = 보존 추천본(최신 mtime).
 fn run_dups(args: &Args) {
     let started = Instant::now();
-    let result = space_dedup::find_duplicates(
-        &args.path,
-        args.min_dup_mib.max(1) * 1024 * 1024,
-        None,
-    )
-    .unwrap_or_else(|e| {
-        eprintln!("error: {}: {}", args.path.display(), e);
-        std::process::exit(1);
-    });
+    let result =
+        space_dedup::find_duplicates(&args.path, args.min_dup_mib.max(1) * 1024 * 1024, None)
+            .unwrap_or_else(|e| {
+                eprintln!("error: {}: {}", args.path.display(), e);
+                std::process::exit(1);
+            });
     let elapsed = started.elapsed();
     let total_reclaimable: u64 = result.groups.iter().map(|g| g.reclaimable).sum();
 
@@ -463,7 +460,10 @@ fn age_label(modified_epoch: i64, now_epoch: i64) -> String {
     if modified_epoch <= 0 {
         return "-".to_string();
     }
-    format!("{}d", space_scanner::age_days(modified_epoch, now_epoch).max(0))
+    format!(
+        "{}d",
+        space_scanner::age_days(modified_epoch, now_epoch).max(0)
+    )
 }
 
 /// 최근 두 스냅샷 비교 — 변화의 범인 출력.

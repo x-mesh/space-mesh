@@ -223,7 +223,11 @@ fn filter_excludes_ignore_dirs_and_missing_git() {
     let candidates = vec![real.clone(), noise.clone(), plain.clone()];
     let repos = filter_repos(&candidates, false);
     assert!(repos.contains(&real), "{:?}", repos);
-    assert!(!repos.contains(&noise), "node_modules 하위 제외: {:?}", repos);
+    assert!(
+        !repos.contains(&noise),
+        "node_modules 하위 제외: {:?}",
+        repos
+    );
     assert!(!repos.contains(&plain), ".git 없으면 제외: {:?}", repos);
 
     let _ = fs::remove_dir_all(&base);

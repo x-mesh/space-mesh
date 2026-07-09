@@ -200,10 +200,10 @@ fn is_registered_submodule(repo: &Path) -> bool {
             if let Ok(content) = std::fs::read_to_string(&modules) {
                 if let Ok(rel) = repo.strip_prefix(dir) {
                     let rel_str = rel.to_string_lossy();
-                    if content.lines().any(|l| {
-                        l.trim_start().starts_with("path")
-                            && l.contains(rel_str.as_ref())
-                    }) {
+                    if content
+                        .lines()
+                        .any(|l| l.trim_start().starts_with("path") && l.contains(rel_str.as_ref()))
+                    {
                         return true;
                     }
                 }

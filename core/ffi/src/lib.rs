@@ -206,14 +206,10 @@ pub fn scan_path(path: String, min_file_mib: u64) -> Result<Arc<ScanHandle>, Sca
 /// SQLite 스냅샷에서 로드. 없으면 Snapshot 에러.
 #[uniffi::export]
 pub fn load_snapshot(db_path: String, root_path: String) -> Result<Arc<ScanHandle>, ScanError> {
-    let conn = space_index::open(Path::new(&db_path)).map_err(|e| ScanError::Snapshot {
-        msg: e.to_string(),
-    })?;
-    let loaded = space_index::load_latest(&conn, Path::new(&root_path)).map_err(|e| {
-        ScanError::Snapshot {
-            msg: e.to_string(),
-        }
-    })?;
+    let conn = space_index::open(Path::new(&db_path))
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    let loaded = space_index::load_latest(&conn, Path::new(&root_path))
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
     let Some((meta, root)) = loaded else {
         return Err(ScanError::Snapshot {
             msg: "no snapshot for this root".into(),
@@ -245,20 +241,13 @@ pub fn scan_and_save(
     };
     let result = scan_with_progress(&root_path, opts, Some(reset_progress()))
         .map_err(|e| ScanError::Io { msg: e.to_string() })?;
-    let mut conn = space_index::open(Path::new(&db_path)).map_err(|e| ScanError::Snapshot {
-        msg: e.to_string(),
-    })?;
-    space_index::save_snapshot(&mut conn, &root_path, &result).map_err(|e| {
-        ScanError::Snapshot {
-            msg: e.to_string(),
-        }
-    })?;
+    let mut conn = space_index::open(Path::new(&db_path))
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    space_index::save_snapshot(&mut conn, &root_path, &result)
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
     // 루트당 최근 N개만 유지 — DB 무한 성장 방지 (실패해도 스캔은 유효).
-    let _ = space_index::prune_snapshots(
-        &mut conn,
-        &root_path,
-        space_index::DEFAULT_KEEP_SNAPSHOTS,
-    );
+    let _ =
+        space_index::prune_snapshots(&mut conn, &root_path, space_index::DEFAULT_KEEP_SNAPSHOTS);
     Ok(Arc::new(ScanHandle {
         root_path,
         stats: ScanStatsInfo {
@@ -325,8 +314,14 @@ impl ScanHandle {
         let mut merged = 0u32;
         for t in &targets {
             use space_scanner::merge::{rescan_and_merge, MergeVerdict};
-            match rescan_and_merge(&mut root, &self.root_path, &mut stats, &mut registry, t, &opts)
-            {
+            match rescan_and_merge(
+                &mut root,
+                &self.root_path,
+                &mut stats,
+                &mut registry,
+                t,
+                &opts,
+            ) {
                 Ok(MergeVerdict::Merged { .. }) => merged += 1,
                 Ok(MergeVerdict::Degrade(reason)) => {
                     return self.rescan_full(&opts, &db_path, &reason)
@@ -718,16 +713,20 @@ fn resolve_by_names<'a>(root: Option<&'a DirNode>, path: &[String]) -> Option<&'
 impl DiffHandle {
     /// 잔차 귀속 범인 목록 (기존 flat 뷰와 동일).
     pub fn culprits(&self, min_delta_mib: u64) -> Vec<DiffEntryInfo> {
-        space_index::diff_trees(self.old.as_ref(), self.new.as_ref(), min_delta_mib * 1024 * 1024)
-            .into_iter()
-            .map(|e| DiffEntryInfo {
-                path: e.path,
-                delta: e.delta,
-                before_total: e.before_total,
-                after_total: e.after_total,
-                is_residual: e.is_residual,
-            })
-            .collect()
+        space_index::diff_trees(
+            self.old.as_ref(),
+            self.new.as_ref(),
+            min_delta_mib * 1024 * 1024,
+        )
+        .into_iter()
+        .map(|e| DiffEntryInfo {
+            path: e.path,
+            delta: e.delta,
+            before_total: e.before_total,
+            after_total: e.after_total,
+            is_residual: e.is_residual,
+        })
+        .collect()
     }
 
     /// path(루트 아래 이름 세그먼트) 디렉토리의 자식별 변화 + 직속 파일 잔차 행.
@@ -749,8 +748,11 @@ impl DiffHandle {
                 new_children.insert(c.name.as_str(), c);
             }
         }
-        let mut names: Vec<&str> =
-            old_children.keys().chain(new_children.keys()).copied().collect();
+        let mut names: Vec<&str> = old_children
+            .keys()
+            .chain(new_children.keys())
+            .copied()
+            .collect();
         names.sort_unstable();
         names.dedup();
 
@@ -892,11 +894,7 @@ pub struct GitReport {
 /// 스캔 트리에서 .git을 가진 노드의 (경로, tree_sig)를 수집한다.
 /// tree_sig = repo 서브트리의 file_count·allocated_size 조합 — working-tree 변경
 /// (파일 추가/삭제/크기변화)을 캐시 무효화 보조 키로 쓴다.
-fn collect_git_candidates(
-    node: &DirNode,
-    path: &std::path::Path,
-    out: &mut Vec<(PathBuf, u64)>,
-) {
+fn collect_git_candidates(node: &DirNode, path: &std::path::Path, out: &mut Vec<(PathBuf, u64)>) {
     let has_dot_git = node.children.iter().any(|c| c.name == ".git");
     if has_dot_git {
         let tree_sig = node
@@ -1021,8 +1019,7 @@ impl ScanHandle {
         // (path, tree_sig) → filter_repos는 경로만 받으므로 매핑 유지.
         let paths: Vec<PathBuf> = candidates.iter().map(|(p, _)| p.clone()).collect();
         let repos = space_git::filter_repos(&paths, include_submodules);
-        let tree_sig_of: std::collections::HashMap<PathBuf, u64> =
-            candidates.into_iter().collect();
+        let tree_sig_of: std::collections::HashMap<PathBuf, u64> = candidates.into_iter().collect();
 
         const TTL: u64 = 24 * 3600;
         let now = std::time::SystemTime::now()
@@ -1062,19 +1059,15 @@ impl ScanHandle {
                 let tsig = tree_sig_of.get(&h.path).copied().unwrap_or(0);
                 let gsig = space_git::git_signature(&h.path);
                 let info = health_to_info(h);
-                let _ = space_index::git_cache_put(
-                    c,
-                    &key,
-                    gsig,
-                    tsig,
-                    &repo_info_to_json(&info),
-                    now,
-                );
+                let _ =
+                    space_index::git_cache_put(c, &key, gsig, tsig, &repo_info_to_json(&info), now);
             }
         }
 
-        let mut repos: Vec<GitRepoInfo> =
-            cached.into_iter().chain(healthy.iter().map(health_to_info)).collect();
+        let mut repos: Vec<GitRepoInfo> = cached
+            .into_iter()
+            .chain(healthy.iter().map(health_to_info))
+            .collect();
         // 위험도순 재정렬 (캐시+신규 혼합).
         repos.sort_by_key(|r| match r.risk.as_str() {
             "danger" => 0u8,

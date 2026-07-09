@@ -211,9 +211,7 @@ pub struct CategoryHit {
 }
 
 fn match_def(name: &str) -> Option<&'static CategoryDef> {
-    CATEGORIES
-        .iter()
-        .find(|def| def.dir_names.contains(&name))
+    CATEGORIES.iter().find(|def| def.dir_names.contains(&name))
 }
 
 /// 스캔된 트리에서 카테고리 히트를 찾는다. 트리는 메모리에 있으므로 빠르고,
@@ -229,10 +227,7 @@ fn walk(node: &DirNode, path: &Path, hits: &mut Vec<CategoryHit>) {
     for child in &node.children {
         let child_path = path.join(&child.name);
         if let Some(def) = match_def(&child.name) {
-            let verified = def
-                .parent_markers
-                .iter()
-                .any(|m| path.join(m).exists())
+            let verified = def.parent_markers.iter().any(|m| path.join(m).exists())
                 || def
                     .inner_markers
                     .iter()
@@ -255,6 +250,45 @@ fn walk(node: &DirNode, path: &Path, hits: &mut Vec<CategoryHit>) {
         }
         walk(child, &child_path, hits);
     }
+}
+
+// ───────────────────────── 유휴 프로젝트 탐지 (git 마지막 커밋) ─────────────────────────
+
+/// 프로젝트 경로의 git 마지막 커밋이 며칠 전인지. .git이 없거나 git 실패 시 None.
+pub fn git_last_commit_days(project: &Path) -> Option<u64> {
+    if !project.join(".git").exists() {
+        return None;
+    }
+    let output = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(project)
+        .args(["log", "-1", "--format=%ct"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let epoch: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(now.saturating_sub(epoch) / 86_400)
+}
+
+/// 히트 목록의 프로젝트별 유휴 일수를 병렬로 채운다 (프로젝트당 git 1회).
+pub fn annotate_idle(hits: &[CategoryHit]) -> std::collections::HashMap<PathBuf, u64> {
+    use rayon::prelude::*;
+    let mut projects: Vec<&PathBuf> = hits.iter().map(|h| &h.project_path).collect();
+    projects.sort_unstable();
+    projects.dedup();
+    projects
+        .par_iter()
+        .filter_map(|p| git_last_commit_days(p).map(|d| ((*p).clone(), d)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -291,7 +325,11 @@ mod tests {
 
         // AI 에이전트 캐시 (.claude) — 마커 불요, safety=warn
         fs::create_dir_all(tmp.join("proj-rs/.claude/projects")).unwrap();
-        fs::write(tmp.join("proj-rs/.claude/projects/log.jsonl"), vec![0u8; 4000]).unwrap();
+        fs::write(
+            tmp.join("proj-rs/.claude/projects/log.jsonl"),
+            vec![0u8; 4000],
+        )
+        .unwrap();
 
         let result = scan(&tmp, ScanOptions::default()).unwrap();
         let hits = find_categories(&result.root, &tmp);
@@ -319,40 +357,4 @@ mod tests {
 
         fs::remove_dir_all(&tmp).unwrap();
     }
-}
-
-// ───────────────────────── 유휴 프로젝트 탐지 (git 마지막 커밋) ─────────────────────────
-
-/// 프로젝트 경로의 git 마지막 커밋이 며칠 전인지. .git이 없거나 git 실패 시 None.
-pub fn git_last_commit_days(project: &Path) -> Option<u64> {
-    if !project.join(".git").exists() {
-        return None;
-    }
-    let output = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(project)
-        .args(["log", "-1", "--format=%ct"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let epoch: u64 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
-    Some(now.saturating_sub(epoch) / 86_400)
-}
-
-/// 히트 목록의 프로젝트별 유휴 일수를 병렬로 채운다 (프로젝트당 git 1회).
-pub fn annotate_idle(hits: &[CategoryHit]) -> std::collections::HashMap<PathBuf, u64> {
-    use rayon::prelude::*;
-    let mut projects: Vec<&PathBuf> = hits.iter().map(|h| &h.project_path).collect();
-    projects.sort_unstable();
-    projects.dedup();
-    projects
-        .par_iter()
-        .filter_map(|p| git_last_commit_days(p).map(|d| ((*p).clone(), d)))
-        .collect()
 }
