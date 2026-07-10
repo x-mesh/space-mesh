@@ -5,6 +5,7 @@
 
 CORE        := core
 APP         := app
+VERSION     := $(shell sed -n 's/^version = "\([^"]*\)"/\1/p' $(CORE)/Cargo.toml | head -1)
 CORE_MANIFEST := $(CORE)/Cargo.toml
 DYLIB       := $(CORE)/target/release/libspace_ffi.dylib
 BINDINGS_OUT := $(APP)/Sources
@@ -61,6 +62,10 @@ app: bindings ## SwiftPM 앱 빌드 (core+바인딩 선행)
 app-release: bindings ## SwiftPM 앱 release 빌드
 	cd $(APP) && swift build -c release
 
+.PHONY: package
+package: ## Homebrew/GitHub Release용 .app zip 생성
+	VERSION="$(VERSION)" ./scripts/package-app.sh
+
 .PHONY: run
 run: app ## 앱 빌드 후 실행
 	$(APP)/.build/debug/SpaceMeshApp
@@ -98,6 +103,7 @@ check: fmt clippy core-test ## 포맷 + 린트 + 테스트
 clean: ## 빌드 산출물 삭제 (core target + app .build)
 	$(CARGO) clean --manifest-path $(CORE_MANIFEST)
 	rm -rf $(APP)/.build
+	rm -rf dist
 
 .PHONY: bench-git
 bench-git: core ## git repo 조회 실측 (인자: ROOT=경로)
