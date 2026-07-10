@@ -54,15 +54,25 @@ struct ContentView: View {
     @State private var selection: SidebarItem = .treemap
 
     var body: some View {
-        VStack(spacing: 0) {
-            toolbar
-            Rectangle().fill(Theme.border).frame(height: 1)
-            HStack(spacing: 0) {
-                sidebarNav
-                    .frame(width: 210)
-                Rectangle().fill(Theme.border).frame(width: 1)
-                detail
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        GeometryReader { geometry in
+            let sidebarWidth: CGFloat = geometry.size.width < 1080 ? 224 : 240
+            let detailWidth = max(0, geometry.size.width - sidebarWidth - 1)
+
+            VStack(spacing: 0) {
+                toolbar
+                Rectangle().fill(Theme.border).frame(height: 1)
+                HStack(spacing: 0) {
+                    sidebarNav
+                        .frame(width: sidebarWidth)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .layoutPriority(10)
+                    Rectangle().fill(Theme.border).frame(width: 1)
+                    detail
+                        .frame(width: detailWidth)
+                        .frame(maxHeight: .infinity)
+                        .clipped()
+                        .layoutPriority(0)
+                }
             }
         }
         .background(Theme.bg)
@@ -73,21 +83,27 @@ struct ContentView: View {
 
     @ViewBuilder
     private var detail: some View {
-        switch selection {
-        case .treemap:
-            treemapSection
-        case .changes:
-            ChangesView(scanTarget: scanTarget)
-        case .categories:
-            CategoriesView(model: cleanup, scanTarget: scanTarget)
-        case .git:
-            GitView(scanTarget: scanTarget)
-        case .cleanup:
-            CleanupView(model: cleanup)
-        case .duplicates:
-            DuplicatesView(model: cleanup, defaultRoot: scanTarget)
-        case .stale:
-            StaleView(cleanup: cleanup)
+        ZStack {
+            MoonBackdrop()
+                .opacity(0.52)
+                .overlay(Color.black.opacity(0.34))
+                .clipped()
+            switch selection {
+            case .treemap:
+                treemapSection
+            case .changes:
+                ChangesView(scanTarget: scanTarget)
+            case .categories:
+                CategoriesView(model: cleanup, scanTarget: scanTarget)
+            case .git:
+                GitView(scanTarget: scanTarget)
+            case .cleanup:
+                CleanupView(model: cleanup)
+            case .duplicates:
+                DuplicatesView(model: cleanup, defaultRoot: scanTarget)
+            case .stale:
+                StaleView(cleanup: cleanup)
+            }
         }
     }
 
@@ -149,7 +165,8 @@ struct ContentView: View {
                 }
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.raised, in: RoundedRectangle(cornerRadius: 6))
+                .background(Theme.raised)
+                .overlay(Rectangle().stroke(Theme.border, lineWidth: 1))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -177,8 +194,8 @@ struct ContentView: View {
             .padding(.vertical, 6)
             .background(
                 selected ? Theme.accentSoft : .clear,
-                in: RoundedRectangle(cornerRadius: 6)
             )
+            .overlay(Rectangle().stroke(selected ? Theme.border : .clear, lineWidth: 1))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -194,14 +211,21 @@ struct ContentView: View {
         } else {
             // VStack 필수 — detail이 바깥 HStack 안에 있어, 감싸지 않으면
             // breadcrumb·divider·treemap이 가로로 나열된다.
-            VStack(spacing: 0) {
-                breadcrumbBar
-                Rectangle().fill(Theme.border).frame(height: 1)
-                HSplitView {
-                    TreemapView()
-                        .frame(minWidth: 480)
-                    sidebar
-                        .frame(minWidth: 260, maxWidth: 380)
+            GeometryReader { geometry in
+                VStack(spacing: 0) {
+                    breadcrumbBar
+                    Rectangle().fill(Theme.border).frame(height: 1)
+                    if geometry.size.width < 820 {
+                        TreemapView()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        HSplitView {
+                            TreemapView()
+                                .frame(minWidth: 480)
+                            sidebar
+                                .frame(minWidth: 240, idealWidth: 300, maxWidth: 360)
+                        }
+                    }
                 }
             }
         }
@@ -312,22 +336,31 @@ struct ContentView: View {
     // MARK: - 빈 상태
 
     private var emptyState: some View {
-        VStack(spacing: 16) {
+        VStack(alignment: .center, spacing: 16) {
             if let error = model.errorMessage {
-                Text(error).font(.callout).foregroundStyle(Theme.warn)
+                Text(error)
+                    .font(.callout)
+                    .foregroundStyle(Theme.warn)
+                    .multilineTextAlignment(.center)
             }
             Image(systemName: "internaldrive")
                 .font(.system(size: 42, weight: .light))
-                .foregroundStyle(Theme.textFaint)
+                .foregroundStyle(Theme.accent)
+                .frame(width: 56, height: 56, alignment: .center)
             VStack(spacing: 6) {
-                Text("디스크가 어디에 쓰이고 있는지 확인하세요")
-                    .font(.title3.weight(.semibold))
+                Text("디스크의 궤도를 그립니다")
+                    .font(.system(size: 22, weight: .medium, design: .rounded))
+                    .tracking(1.8)
                     .foregroundStyle(Theme.text)
-                Text("경로를 정하고 SCAN — 진단에서 탐색하고, 회수 그룹에서 공간을 되찾습니다")
+                    .multilineTextAlignment(.center)
+                Text("경로를 정하고 SCAN — 사용량을 지도처럼 탐색하세요")
                     .font(.callout)
                     .foregroundStyle(Theme.textDim)
+                    .multilineTextAlignment(.center)
             }
+            InstrumentLabel(text: "SPACE-MESH // ORBIT 01")
         }
+        .frame(maxWidth: 560)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -457,4 +490,3 @@ struct ContentView: View {
         .background(Theme.bg)
     }
 }
-

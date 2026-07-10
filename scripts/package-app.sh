@@ -36,8 +36,9 @@ SWIFT_BIN_DIR="$(cd "$ROOT/app" && swift build -c release --show-bin-path)"
 APP_BINARY="$SWIFT_BIN_DIR/SpaceMeshApp"
 RUST_DYLIB="$ROOT/core/target/release/libspace_ffi.dylib"
 CLI_BINARY="$ROOT/core/target/release/space-mesh"
+MOON_BACKGROUND="$ROOT/app/Sources/SpaceMeshApp/Resources/MoonBackground.png"
 
-for path in "$APP_BINARY" "$RUST_DYLIB" "$CLI_BINARY" "$ICON_SOURCE"; do
+for path in "$APP_BINARY" "$RUST_DYLIB" "$CLI_BINARY" "$ICON_SOURCE" "$MOON_BACKGROUND"; do
   if [[ ! -f "$path" ]]; then
     echo "ERROR: required build output is missing: $path" >&2
     exit 1
@@ -50,6 +51,12 @@ install -m 755 "$APP_BINARY" "$APP_DIR/Contents/MacOS/SpaceMeshApp"
 install -m 755 "$RUST_DYLIB" "$APP_DIR/Contents/Frameworks/libspace_ffi.dylib"
 install -m 755 "$CLI_BINARY" "$APP_DIR/Contents/Resources/space-mesh"
 install -m 644 "$ROOT/packaging/Info.plist" "$APP_DIR/Contents/Info.plist"
+install -m 644 "$MOON_BACKGROUND" "$APP_DIR/Contents/Resources/MoonBackground.png"
+
+if [[ ! -f "$APP_DIR/Contents/Resources/MoonBackground.png" ]]; then
+  echo "ERROR: packaged app is missing MoonBackground.png" >&2
+  exit 1
+fi
 
 install -d "$ICONSET"
 for spec in \

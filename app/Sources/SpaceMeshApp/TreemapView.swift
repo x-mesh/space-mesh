@@ -23,24 +23,22 @@ struct TreemapView: View {
             let tiles = computeTiles(in: CGRect(origin: .zero, size: geo.size))
             Canvas { ctx, _ in
                 for tile in tiles {
-                    let r = tile.rect.insetBy(dx: 0.75, dy: 0.75)
+                    let r = tile.rect.insetBy(dx: 1, dy: 1)
                     guard r.width > 1, r.height > 1 else { continue }
                     let hovered = tile.id == hoveredTileID
                     ctx.fill(
                         Path(roundedRect: r, cornerRadius: 2),
-                        with: .color(tile.color.opacity(hovered ? 1.0 : 0.88))
+                        with: .color(tile.color.opacity(hovered ? 1.0 : 0.94))
                     )
-                    if hovered {
-                        ctx.stroke(
-                            Path(roundedRect: r.insetBy(dx: 0.75, dy: 0.75), cornerRadius: 2),
-                            with: .color(Theme.accent),
-                            lineWidth: 1.5
-                        )
-                    }
+                    ctx.stroke(
+                        Path(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), cornerRadius: 2),
+                        with: .color(hovered ? Theme.accent : Color.white.opacity(0.16)),
+                        lineWidth: hovered ? 1.5 : 1
+                    )
                     if r.width > 64, r.height > 30 {
                         let label = Text(tile.label)
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Color(red: 0.95, green: 0.93, blue: 0.90))
+                            .foregroundStyle(Theme.text)
                         ctx.draw(
                             label,
                             in: CGRect(
@@ -48,7 +46,7 @@ struct TreemapView: View {
                                 width: r.width - 12, height: 14))
                         let size = Text(humanBytes(tile.size))
                             .font(.system(size: 9.5, design: .monospaced))
-                            .foregroundStyle(Color(red: 0.95, green: 0.93, blue: 0.90).opacity(0.75))
+                            .foregroundStyle(Theme.text.opacity(0.78))
                         ctx.draw(
                             size,
                             in: CGRect(
@@ -124,9 +122,15 @@ struct TreemapView: View {
         for byte in name.utf8 {
             hash = hash &* 33 &+ UInt64(byte)
         }
-        let hue = Double(hash % 360) / 360.0
-        let saturation = 0.34 + Double((hash / 360) % 14) / 100.0  // 0.34~0.47
-        let brightness = 0.50 + Double((hash / 5040) % 12) / 100.0 // 0.50~0.61
-        return Color(hue: hue, saturation: saturation, brightness: brightness)
+        // 달 표면과 어울리는 저채도 광물색. 색상과 명도를 함께 분산해 인접 타일을 구분한다.
+        let palette: [Color] = [
+            Color(red: 0.25, green: 0.31, blue: 0.33), // lunar teal
+            Color(red: 0.31, green: 0.32, blue: 0.36), // blue gray
+            Color(red: 0.34, green: 0.31, blue: 0.35), // mineral violet
+            Color(red: 0.36, green: 0.34, blue: 0.30), // muted bronze
+            Color(red: 0.29, green: 0.34, blue: 0.31), // lunar sage
+            Color(red: 0.38, green: 0.38, blue: 0.39), // moon stone
+        ]
+        return palette[Int(hash % UInt64(palette.count))]
     }
 }

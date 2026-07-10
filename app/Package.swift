@@ -20,6 +20,7 @@ let package = Package(
             name: "SpaceMeshApp",
             dependencies: ["SpaceMeshCore"],
             path: "Sources/SpaceMeshApp",
+            exclude: ["Resources"],
             linkerSettings: [
                 .unsafeFlags(["-L\(Context.packageDirectory)/../core/target/release"]),
                 .linkedLibrary("space_ffi"),
