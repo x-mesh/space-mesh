@@ -753,7 +753,7 @@ checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
 
 [[package]]
 name = "space-dedup"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "rayon",
@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "space-ffi"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "space-dedup",
  "space-git",
@@ -775,14 +775,14 @@ dependencies = [
 
 [[package]]
 name = "space-git"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "rayon",
 ]
 
 [[package]]
 name = "space-index"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "rusqlite",
  "space-scanner",
@@ -790,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "space-mesh-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "clap",
  "libc",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "space-rules"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "rayon",
  "serde",
@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "space-scanner"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "dashmap",
  "rayon",
