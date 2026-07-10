@@ -4,6 +4,7 @@
 //! 재스캔 없이 이전 상태를 즉시 로드한다. FSEvents 증분 반영은 M4에서 이 위에 얹는다.
 
 use rusqlite::{params, Connection};
+use space_scanner::merge::{HardlinkOwner, HardlinkRegistry};
 use space_scanner::{DirNode, FileEntry, ScanResult};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,8 @@ pub struct SnapshotMeta {
     pub created_at: String,
     pub total_files: u64,
     pub total_dirs: u64,
+    pub fsevent_cursor: u64,
+    pub incremental_ready: bool,
 }
 
 /// 루트당 유지할 기본 스냅샷 개수 (PERF-005 — 무한 축적 방지).
@@ -32,7 +35,9 @@ pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
             root_path TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
             total_files INTEGER NOT NULL,
-            total_dirs INTEGER NOT NULL
+            total_dirs INTEGER NOT NULL,
+            fsevent_cursor INTEGER NOT NULL DEFAULT 0,
+            incremental_ready INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS nodes (
             scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
@@ -61,6 +66,27 @@ pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
         "ALTER TABLE big_files ADD COLUMN modified_epoch INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE scans ADD COLUMN fsevent_cursor INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE scans ADD COLUMN incremental_ready INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS hardlinks (
+            scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+            dev INTEGER NOT NULL,
+            ino INTEGER NOT NULL,
+            owner_path TEXT NOT NULL,
+            logical_size INTEGER NOT NULL,
+            allocated_size INTEGER NOT NULL,
+            nlink INTEGER NOT NULL,
+            seen INTEGER NOT NULL,
+            PRIMARY KEY (scan_id, dev, ino)
+        );",
+    )?;
     Ok(conn)
 }
 
@@ -70,13 +96,26 @@ pub fn save_snapshot(
     root_path: &Path,
     result: &ScanResult,
 ) -> rusqlite::Result<i64> {
+    save_snapshot_with_cursor(conn, root_path, result, 0)
+}
+
+/// 스캔 결과와 스캔 시작 시점의 FSEvents cursor를 원자적으로 저장한다.
+pub fn save_snapshot_with_cursor(
+    conn: &mut Connection,
+    root_path: &Path,
+    result: &ScanResult,
+    fsevent_cursor: u64,
+) -> rusqlite::Result<i64> {
     let tx = conn.transaction()?;
     tx.execute(
-        "INSERT INTO scans (root_path, total_files, total_dirs) VALUES (?1, ?2, ?3)",
+        "INSERT INTO scans
+         (root_path, total_files, total_dirs, fsevent_cursor, incremental_ready)
+         VALUES (?1, ?2, ?3, ?4, 1)",
         params![
             root_path.to_string_lossy(),
             result.stats.total_files as i64,
-            result.stats.total_dirs as i64
+            result.stats.total_dirs as i64,
+            fsevent_cursor as i64,
         ],
     )?;
     let scan_id = tx.last_insert_rowid();
@@ -88,6 +127,11 @@ pub fn save_snapshot(
         let mut file_stmt = tx.prepare(
             "INSERT INTO big_files (scan_id, node_id, path, logical_size, allocated_size, modified_epoch)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        let mut hardlink_stmt = tx.prepare(
+            "INSERT INTO hardlinks
+             (scan_id, dev, ino, owner_path, logical_size, allocated_size, nlink, seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
 
         // 명시적 스택으로 순회 (트리 깊이에 따른 콜스택 부담 회피).
@@ -120,6 +164,18 @@ pub fn save_snapshot(
                 stack.push((c, Some(node_id)));
             }
         }
+        for ((dev, ino), owner) in &result.hardlinks {
+            hardlink_stmt.execute(params![
+                scan_id,
+                *dev as i64,
+                *ino as i64,
+                owner.path.to_string_lossy(),
+                owner.logical as i64,
+                owner.alloc as i64,
+                owner.nlink as i64,
+                owner.seen as i64,
+            ])?;
+        }
     }
     tx.commit()?;
     Ok(scan_id)
@@ -132,7 +188,8 @@ pub fn load_latest(
 ) -> rusqlite::Result<Option<(SnapshotMeta, DirNode)>> {
     let meta: Option<SnapshotMeta> = conn
         .query_row(
-            "SELECT id, root_path, created_at, total_files, total_dirs
+            "SELECT id, root_path, created_at, total_files, total_dirs,
+                    fsevent_cursor, incremental_ready
              FROM scans WHERE root_path = ?1 ORDER BY id DESC LIMIT 1",
             params![root_path.to_string_lossy()],
             |row| {
@@ -142,6 +199,8 @@ pub fn load_latest(
                     created_at: row.get(2)?,
                     total_files: row.get::<_, i64>(3)? as u64,
                     total_dirs: row.get::<_, i64>(4)? as u64,
+                    fsevent_cursor: row.get::<_, i64>(5)? as u64,
+                    incremental_ready: row.get::<_, i64>(6)? != 0,
                 })
             },
         )
@@ -155,6 +214,43 @@ pub fn load_latest(
         Some(root) => Ok(Some((meta, root))),
         None => Ok(None),
     }
+}
+
+/// 최신 트리와 증분 병합에 필요한 hardlink registry를 함께 로드한다.
+/// 구버전 스냅샷은 registry를 복원할 수 없으므로 None을 반환한다.
+pub fn load_latest_incremental(
+    conn: &Connection,
+    root_path: &Path,
+) -> rusqlite::Result<Option<(SnapshotMeta, DirNode, Option<HardlinkRegistry>)>> {
+    let Some((meta, root)) = load_latest(conn, root_path)? else {
+        return Ok(None);
+    };
+    let registry = if meta.incremental_ready {
+        Some(load_hardlinks(conn, meta.scan_id)?)
+    } else {
+        None
+    };
+    Ok(Some((meta, root, registry)))
+}
+
+fn load_hardlinks(conn: &Connection, scan_id: i64) -> rusqlite::Result<HardlinkRegistry> {
+    let mut stmt = conn.prepare(
+        "SELECT dev, ino, owner_path, logical_size, allocated_size, nlink, seen
+         FROM hardlinks WHERE scan_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![scan_id], |row| {
+        Ok((
+            (row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64),
+            HardlinkOwner {
+                path: PathBuf::from(row.get::<_, String>(2)?),
+                logical: row.get::<_, i64>(3)? as u64,
+                alloc: row.get::<_, i64>(4)? as u64,
+                nlink: row.get::<_, i64>(5)? as u64,
+                seen: row.get::<_, i64>(6)? as u64,
+            },
+        ))
+    })?;
+    rows.collect()
 }
 
 /// scan_id의 노드 전체를 읽어 parent 관계로 트리를 재조립한다.
@@ -257,6 +353,7 @@ mod tests {
         fs::create_dir_all(tmp.join("sub")).unwrap();
         fs::write(tmp.join("a.bin"), vec![1u8; 5000]).unwrap();
         fs::write(tmp.join("sub/b.bin"), vec![2u8; 7000]).unwrap();
+        fs::hard_link(tmp.join("a.bin"), tmp.join("sub/a-link.bin")).unwrap();
 
         let result = scan(
             &tmp,
@@ -269,11 +366,13 @@ mod tests {
 
         let db = tmp.join("snap.db");
         let mut conn = open(&db).unwrap();
-        let scan_id = save_snapshot(&mut conn, &tmp, &result).unwrap();
+        let scan_id = save_snapshot_with_cursor(&mut conn, &tmp, &result, 42).unwrap();
         assert!(scan_id > 0);
 
         let (meta, loaded) = load_latest(&conn, &tmp).unwrap().unwrap();
         assert_eq!(meta.total_files, result.stats.total_files);
+        assert_eq!(meta.fsevent_cursor, 42);
+        assert!(meta.incremental_ready);
         assert_eq!(loaded.logical_size, result.root.logical_size);
         assert_eq!(loaded.allocated_size, result.root.allocated_size);
         assert_eq!(loaded.dir_count, result.root.dir_count);
@@ -286,6 +385,8 @@ mod tests {
             count(&loaded)
         };
         assert_eq!(total_big, 2);
+        let (_, _, restored_registry) = load_latest_incremental(&conn, &tmp).unwrap().unwrap();
+        assert_eq!(restored_registry.unwrap().len(), result.hardlinks.len());
         // mtime도 저장/복원되어야 한다 (방금 만든 파일이므로 0일 수 없음).
         {
             fn assert_mtimes(n: &DirNode) {
@@ -299,6 +400,55 @@ mod tests {
 
         drop(conn);
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn opens_legacy_schema_as_non_incremental_snapshot() {
+        let db = std::env::temp_dir().join(format!("space-index-legacy-{}.db", std::process::id()));
+        let _ = fs::remove_file(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE scans (
+                    id INTEGER PRIMARY KEY,
+                    root_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    total_files INTEGER NOT NULL,
+                    total_dirs INTEGER NOT NULL
+                );
+                CREATE TABLE nodes (
+                    scan_id INTEGER NOT NULL,
+                    node_id INTEGER NOT NULL,
+                    parent_id INTEGER,
+                    name TEXT NOT NULL,
+                    logical_size INTEGER NOT NULL,
+                    allocated_size INTEGER NOT NULL,
+                    file_count INTEGER NOT NULL,
+                    dir_count INTEGER NOT NULL,
+                    PRIMARY KEY (scan_id, node_id)
+                );
+                CREATE TABLE big_files (
+                    scan_id INTEGER NOT NULL,
+                    node_id INTEGER NOT NULL,
+                    path TEXT NOT NULL,
+                    logical_size INTEGER NOT NULL,
+                    allocated_size INTEGER NOT NULL
+                );
+                INSERT INTO scans VALUES (1, '/tmp/legacy-root', '2026-01-01T00:00:00Z', 0, 1);
+                INSERT INTO nodes VALUES (1, 0, NULL, 'legacy-root', 0, 0, 0, 1);",
+            )
+            .unwrap();
+        }
+
+        let conn = open(&db).unwrap();
+        let (meta, _, registry) = load_latest_incremental(&conn, Path::new("/tmp/legacy-root"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(meta.fsevent_cursor, 0);
+        assert!(!meta.incremental_ready);
+        assert!(registry.is_none());
+        drop(conn);
+        let _ = fs::remove_file(&db);
     }
 
     #[test]
@@ -355,7 +505,8 @@ mod tests {
 /// 해당 루트의 스냅샷 목록 (최신순).
 pub fn list_snapshots(conn: &Connection, root_path: &Path) -> rusqlite::Result<Vec<SnapshotMeta>> {
     let mut stmt = conn.prepare(
-        "SELECT id, root_path, created_at, total_files, total_dirs
+        "SELECT id, root_path, created_at, total_files, total_dirs,
+                fsevent_cursor, incremental_ready
          FROM scans WHERE root_path = ?1 ORDER BY id DESC",
     )?;
     let rows = stmt.query_map(params![root_path.to_string_lossy()], |row| {
@@ -365,6 +516,8 @@ pub fn list_snapshots(conn: &Connection, root_path: &Path) -> rusqlite::Result<V
             created_at: row.get(2)?,
             total_files: row.get::<_, i64>(3)? as u64,
             total_dirs: row.get::<_, i64>(4)? as u64,
+            fsevent_cursor: row.get::<_, i64>(5)? as u64,
+            incremental_ready: row.get::<_, i64>(6)? != 0,
         })
     })?;
     rows.collect()
@@ -394,6 +547,7 @@ pub fn prune_snapshots(
         rows.collect::<Result<_, _>>()?
     };
     for id in &old_ids {
+        tx.execute("DELETE FROM hardlinks WHERE scan_id = ?1", params![id])?;
         tx.execute("DELETE FROM big_files WHERE scan_id = ?1", params![id])?;
         tx.execute("DELETE FROM nodes WHERE scan_id = ?1", params![id])?;
         tx.execute("DELETE FROM scans WHERE id = ?1", params![id])?;

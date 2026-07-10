@@ -743,7 +743,7 @@ public protocol ScanHandleProtocol: AnyObject, Sendable {
      * 반환 핸들은 어느 경로든 항상 올바르다. db_path가 비어 있지 않으면
      * 스냅샷 저장 + 프루닝까지 수행한다 (기존 scan_and_save와 동일 계약).
      */
-    func rescanPaths(paths: [String], minFileMib: UInt64, dbPath: String) throws  -> RescanReport
+    func rescanPaths(paths: [String], minFileMib: UInt64, dbPath: String, fseventCursor: UInt64) throws  -> RescanReport
     
     /**
      * 트리 전체에서 "크고 오래 방치된" 파일 top-N (점수 = allocated × 방치일).
@@ -925,12 +925,13 @@ open func reclaimSummary() -> ReclaimSummary  {
      * 반환 핸들은 어느 경로든 항상 올바르다. db_path가 비어 있지 않으면
      * 스냅샷 저장 + 프루닝까지 수행한다 (기존 scan_and_save와 동일 계약).
      */
-open func rescanPaths(paths: [String], minFileMib: UInt64, dbPath: String)throws  -> RescanReport  {
+open func rescanPaths(paths: [String], minFileMib: UInt64, dbPath: String, fseventCursor: UInt64)throws  -> RescanReport  {
     return try  FfiConverterTypeRescanReport_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
     uniffi_space_ffi_fn_method_scanhandle_rescan_paths(self.uniffiClonePointer(),
         FfiConverterSequenceString.lower(paths),
         FfiConverterUInt64.lower(minFileMib),
-        FfiConverterString.lower(dbPath),$0
+        FfiConverterString.lower(dbPath),
+        FfiConverterUInt64.lower(fseventCursor),$0
     )
 })
 }
@@ -2490,6 +2491,69 @@ public func FfiConverterTypeSnapshotInfo_lower(_ value: SnapshotInfo) -> RustBuf
 }
 
 
+/**
+ * 재시작 후 FSEvents journal을 이어받기 위한 최신 스냅샷 상태.
+ */
+public struct SnapshotState {
+    public var handle: ScanHandle
+    public var fseventCursor: UInt64
+    public var incrementalReady: Bool
+    public var createdAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(handle: ScanHandle, fseventCursor: UInt64, incrementalReady: Bool, createdAt: String) {
+        self.handle = handle
+        self.fseventCursor = fseventCursor
+        self.incrementalReady = incrementalReady
+        self.createdAt = createdAt
+    }
+}
+
+#if compiler(>=6)
+extension SnapshotState: Sendable {}
+#endif
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSnapshotState: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SnapshotState {
+        return
+            try SnapshotState(
+                handle: FfiConverterTypeScanHandle.read(from: &buf), 
+                fseventCursor: FfiConverterUInt64.read(from: &buf), 
+                incrementalReady: FfiConverterBool.read(from: &buf), 
+                createdAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SnapshotState, into buf: inout [UInt8]) {
+        FfiConverterTypeScanHandle.write(value.handle, into: &buf)
+        FfiConverterUInt64.write(value.fseventCursor, into: &buf)
+        FfiConverterBool.write(value.incrementalReady, into: &buf)
+        FfiConverterString.write(value.createdAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotState_lift(_ buf: RustBuffer) throws -> SnapshotState {
+    return try FfiConverterTypeSnapshotState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSnapshotState_lower(_ value: SnapshotState) -> RustBuffer {
+    return FfiConverterTypeSnapshotState.lower(value)
+}
+
+
 public struct ToolAdviceInfo {
     public var tool: String
     public var command: String
@@ -3124,6 +3188,17 @@ public func loadSnapshot(dbPath: String, rootPath: String)throws  -> ScanHandle 
     )
 })
 }
+/**
+ * SQLite 스냅샷에서 트리, hardlink registry, FSEvents cursor를 함께 복원한다.
+ */
+public func loadSnapshotState(dbPath: String, rootPath: String)throws  -> SnapshotState  {
+    return try  FfiConverterTypeSnapshotState_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_func_load_snapshot_state(
+        FfiConverterString.lower(dbPath),
+        FfiConverterString.lower(rootPath),$0
+    )
+})
+}
 public func openDiff(dbPath: String, oldId: Int64, newId: Int64)throws  -> DiffHandle  {
     return try  FfiConverterTypeDiffHandle_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
     uniffi_space_ffi_fn_func_open_diff(
@@ -3142,6 +3217,19 @@ public func scanAndSave(path: String, minFileMib: UInt64, dbPath: String)throws 
         FfiConverterString.lower(path),
         FfiConverterUInt64.lower(minFileMib),
         FfiConverterString.lower(dbPath),$0
+    )
+})
+}
+/**
+ * 스캔 시작 직전의 FSEvents cursor와 함께 저장하는 live-watch용 경로.
+ */
+public func scanAndSaveWithCursor(path: String, minFileMib: UInt64, dbPath: String, fseventCursor: UInt64)throws  -> ScanHandle  {
+    return try  FfiConverterTypeScanHandle_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_func_scan_and_save_with_cursor(
+        FfiConverterString.lower(path),
+        FfiConverterUInt64.lower(minFileMib),
+        FfiConverterString.lower(dbPath),
+        FfiConverterUInt64.lower(fseventCursor),$0
     )
 })
 }
@@ -3208,10 +3296,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_space_ffi_checksum_func_load_snapshot() != 63787) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_space_ffi_checksum_func_load_snapshot_state() != 52298) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_space_ffi_checksum_func_open_diff() != 51550) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_func_scan_and_save() != 45019) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_func_scan_and_save_with_cursor() != 31525) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_func_scan_path() != 53455) {
@@ -3259,7 +3353,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_space_ffi_checksum_method_scanhandle_reclaim_summary() != 64489) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_space_ffi_checksum_method_scanhandle_rescan_paths() != 16835) {
+    if (uniffi_space_ffi_checksum_method_scanhandle_rescan_paths() != 44624) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_stale_files() != 62394) {

@@ -77,9 +77,18 @@ pub struct ScanHandle {
     root_path: PathBuf,
     root: DirNode,
     stats: ScanStatsInfo,
-    /// 증분 재스캔용 하드링크 레지스트리. None = 스냅샷 로드 핸들
-    /// (레지스트리 없음 → rescan_paths가 항상 풀스캔으로 강등).
+    /// 증분 재스캔용 하드링크 레지스트리. None = registry가 없던 구버전 스냅샷
+    /// (rescan_paths가 항상 풀스캔으로 강등).
     hardlinks: Option<space_scanner::merge::HardlinkRegistry>,
+}
+
+/// 재시작 후 FSEvents journal을 이어받기 위한 최신 스냅샷 상태.
+#[derive(uniffi::Record)]
+pub struct SnapshotState {
+    pub handle: Arc<ScanHandle>,
+    pub fsevent_cursor: u64,
+    pub incremental_ready: bool,
+    pub created_at: String,
 }
 
 impl ScanHandle {
@@ -206,25 +215,36 @@ pub fn scan_path(path: String, min_file_mib: u64) -> Result<Arc<ScanHandle>, Sca
 /// SQLite 스냅샷에서 로드. 없으면 Snapshot 에러.
 #[uniffi::export]
 pub fn load_snapshot(db_path: String, root_path: String) -> Result<Arc<ScanHandle>, ScanError> {
+    Ok(load_snapshot_state(db_path, root_path)?.handle)
+}
+
+/// SQLite 스냅샷에서 트리, hardlink registry, FSEvents cursor를 함께 복원한다.
+#[uniffi::export]
+pub fn load_snapshot_state(db_path: String, root_path: String) -> Result<SnapshotState, ScanError> {
     let conn = space_index::open(Path::new(&db_path))
         .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
-    let loaded = space_index::load_latest(&conn, Path::new(&root_path))
+    let loaded = space_index::load_latest_incremental(&conn, Path::new(&root_path))
         .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
-    let Some((meta, root)) = loaded else {
+    let Some((meta, root, hardlinks)) = loaded else {
         return Err(ScanError::Snapshot {
             msg: "no snapshot for this root".into(),
         });
     };
-    Ok(Arc::new(ScanHandle {
-        root_path: PathBuf::from(root_path),
-        stats: ScanStatsInfo {
-            total_files: meta.total_files,
-            total_dirs: meta.total_dirs,
-            errors: 0,
-        },
-        root,
-        hardlinks: None,
-    }))
+    Ok(SnapshotState {
+        handle: Arc::new(ScanHandle {
+            root_path: PathBuf::from(root_path),
+            stats: ScanStatsInfo {
+                total_files: meta.total_files,
+                total_dirs: meta.total_dirs,
+                errors: 0,
+            },
+            root,
+            hardlinks,
+        }),
+        fsevent_cursor: meta.fsevent_cursor,
+        incremental_ready: meta.incremental_ready,
+        created_at: meta.created_at,
+    })
 }
 
 /// 스캔 후 스냅샷 저장까지 한 번에.
@@ -233,6 +253,26 @@ pub fn scan_and_save(
     path: String,
     min_file_mib: u64,
     db_path: String,
+) -> Result<Arc<ScanHandle>, ScanError> {
+    scan_and_save_impl(path, min_file_mib, db_path, 0)
+}
+
+/// 스캔 시작 직전의 FSEvents cursor와 함께 저장하는 live-watch용 경로.
+#[uniffi::export]
+pub fn scan_and_save_with_cursor(
+    path: String,
+    min_file_mib: u64,
+    db_path: String,
+    fsevent_cursor: u64,
+) -> Result<Arc<ScanHandle>, ScanError> {
+    scan_and_save_impl(path, min_file_mib, db_path, fsevent_cursor)
+}
+
+fn scan_and_save_impl(
+    path: String,
+    min_file_mib: u64,
+    db_path: String,
+    fsevent_cursor: u64,
 ) -> Result<Arc<ScanHandle>, ScanError> {
     let root_path = PathBuf::from(&path);
     let opts = ScanOptions {
@@ -243,7 +283,7 @@ pub fn scan_and_save(
         .map_err(|e| ScanError::Io { msg: e.to_string() })?;
     let mut conn = space_index::open(Path::new(&db_path))
         .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
-    space_index::save_snapshot(&mut conn, &root_path, &result)
+    space_index::save_snapshot_with_cursor(&mut conn, &root_path, &result, fsevent_cursor)
         .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
     // 루트당 최근 N개만 유지 — DB 무한 성장 방지 (실패해도 스캔은 유효).
     let _ =
@@ -284,6 +324,7 @@ impl ScanHandle {
         paths: Vec<String>,
         min_file_mib: u64,
         db_path: String,
+        fsevent_cursor: u64,
     ) -> Result<RescanReport, ScanError> {
         let opts = ScanOptions {
             record_file_threshold: min_file_mib * 1024 * 1024,
@@ -291,7 +332,12 @@ impl ScanHandle {
         };
 
         let Some(registry0) = &self.hardlinks else {
-            return self.rescan_full(&opts, &db_path, "no hardlink registry (snapshot handle)");
+            return self.rescan_full(
+                &opts,
+                &db_path,
+                fsevent_cursor,
+                "no hardlink registry (legacy snapshot handle)",
+            );
         };
 
         // 방어적 정규화: 정렬 후 포함관계 병합 (/a가 있으면 /a/b 제거).
@@ -324,9 +370,11 @@ impl ScanHandle {
             ) {
                 Ok(MergeVerdict::Merged { .. }) => merged += 1,
                 Ok(MergeVerdict::Degrade(reason)) => {
-                    return self.rescan_full(&opts, &db_path, &reason)
+                    return self.rescan_full(&opts, &db_path, fsevent_cursor, &reason)
                 }
-                Err(e) => return self.rescan_full(&opts, &db_path, &format!("io: {e}")),
+                Err(e) => {
+                    return self.rescan_full(&opts, &db_path, fsevent_cursor, &format!("io: {e}"))
+                }
             }
         }
 
@@ -340,7 +388,7 @@ impl ScanHandle {
             root,
             hardlinks: Some(registry),
         });
-        handle.save_to_db(&db_path)?;
+        handle.save_to_db(&db_path, fsevent_cursor)?;
         Ok(RescanReport {
             handle,
             degraded: false,
@@ -356,6 +404,7 @@ impl ScanHandle {
         &self,
         opts: &ScanOptions,
         db_path: &str,
+        fsevent_cursor: u64,
         reason: &str,
     ) -> Result<RescanReport, ScanError> {
         let result = scan_with_progress(&self.root_path, opts.clone(), Some(reset_progress()))
@@ -370,7 +419,7 @@ impl ScanHandle {
             root: result.root,
             hardlinks: Some(result.hardlinks),
         });
-        handle.save_to_db(db_path)?;
+        handle.save_to_db(db_path, fsevent_cursor)?;
         Ok(RescanReport {
             handle,
             degraded: true,
@@ -380,7 +429,7 @@ impl ScanHandle {
     }
 
     /// 트리를 스냅샷으로 저장(+프루닝). db_path가 비면 no-op.
-    fn save_to_db(&self, db_path: &str) -> Result<(), ScanError> {
+    fn save_to_db(&self, db_path: &str, fsevent_cursor: u64) -> Result<(), ScanError> {
         if db_path.is_empty() {
             return Ok(());
         }
@@ -393,10 +442,10 @@ impl ScanHandle {
                 total_files: self.stats.total_files,
                 total_dirs: self.stats.total_dirs,
             },
-            hardlinks: Default::default(),
+            hardlinks: self.hardlinks.clone().unwrap_or_default(),
             preseen_hits: Default::default(),
         };
-        space_index::save_snapshot(&mut conn, &self.root_path, &result)
+        space_index::save_snapshot_with_cursor(&mut conn, &self.root_path, &result, fsevent_cursor)
             .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
         let _ = space_index::prune_snapshots(
             &mut conn,

@@ -128,6 +128,10 @@ final class BackgroundAgent: ObservableObject {
     private var lastHandle: ScanHandle?
     /// debounce 창 동안 누적된 변경 디렉토리 경로 (FSEvents 기본 = 디렉토리 단위).
     private var pendingPaths: Set<String> = []
+    /// pendingPaths에 포함된 이벤트 중 가장 큰 FSEvents event id.
+    private var pendingEventCursor: UInt64 = 0
+    /// 비동기 스냅샷 로드가 stop/restart 뒤 늦게 stream을 시작하지 못하게 한다.
+    private var streamGeneration: UInt64 = 0
     /// MustScanSubDirs(드롭 동반)/RootChanged/Mount/Unmount 감지 — 다음 재집계는 풀스캔.
     private var forceFullScan = false
     /// 재베이스 정책: 증분 100회 또는 24시간마다 풀스캔 (Syncthing/Watchman 선례).
@@ -139,17 +143,44 @@ final class BackgroundAgent: ObservableObject {
     /// 풀스캔 강등 신호 플래그 (Apple 가이드: MustScanSubDirs만 봐도 드롭 케이스 커버).
     private static let degradeFlags: FSEventStreamEventFlags = FSEventStreamEventFlags(
         kFSEventStreamEventFlagMustScanSubDirs | kFSEventStreamEventFlagRootChanged
-            | kFSEventStreamEventFlagMount | kFSEventStreamEventFlagUnmount)
+            | kFSEventStreamEventFlagMount | kFSEventStreamEventFlagUnmount
+            | kFSEventStreamEventFlagKernelDropped | kFSEventStreamEventFlagUserDropped
+            | kFSEventStreamEventFlagEventIdsWrapped)
 
     private func startLiveWatch(root: String, budgetGiB: Double) {
         watchRoot = root
         budgetBytes = budgetGiB > 0 ? UInt64(budgetGiB * 1_073_741_824) : 0
-        // 증분 상태 리셋 — 첫 재집계는 항상 풀스캔(베이스 확보).
+        // 메모리 상태를 비운 뒤 DB 스냅샷에서 증분 베이스를 비동기로 복원한다.
         lastHandle = nil
         pendingPaths = []
+        pendingEventCursor = 0
         forceFullScan = false
         incrementalCount = 0
         lastFullScanAt = .distantPast
+        streamGeneration &+= 1
+        let generation = streamGeneration
+        status = "이전 스캔 상태 확인 중"
+
+        Task {
+            let state = await Task.detached(priority: .utility) {
+                try? loadSnapshotState(dbPath: AppModel.dbPath, rootPath: root)
+            }.value
+            guard self.streamGeneration == generation, self.watchRoot == root else { return }
+            self.beginLiveWatch(root: root, restored: state)
+        }
+    }
+
+    private func beginLiveWatch(root: String, restored: SnapshotState?) {
+        var since = FSEventStreamEventId(kFSEventStreamEventIdSinceNow)
+        if let restored, restored.incrementalReady, restored.fseventCursor > 0 {
+            lastHandle = restored.handle
+            since = FSEventStreamEventId(restored.fseventCursor)
+            lastFullScanAt = ISO8601DateFormatter().date(from: restored.createdAt) ?? .distantPast
+            let total = (try? restored.handle.nodeAt(indexPath: []).allocatedSize) ?? 0
+            lastTotal = total
+            lastUpdated = lastFullScanAt == .distantPast ? nil : lastFullScanAt
+            status = "스냅샷 복원 · \(humanBytes(total))"
+        }
 
         var context = FSEventStreamContext(
             version: 0,
@@ -160,11 +191,11 @@ final class BackgroundAgent: ObservableObject {
         // UseCFTypes: 콜백의 eventPaths를 CFArray<CFString>으로 받아 증분 대상 수집.
         let flags = UInt32(
             kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot
-                | kFSEventStreamCreateFlagUseCFTypes)
+                | kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagIgnoreSelf)
         guard
             let stream = FSEventStreamCreate(
                 kCFAllocatorDefault,
-                { _, info, numEvents, eventPaths, eventFlags, _ in
+                { _, info, numEvents, eventPaths, eventFlags, eventIds in
                     guard let info else { return }
                     let agent = Unmanaged<BackgroundAgent>.fromOpaque(info)
                         .takeUnretainedValue()
@@ -173,11 +204,14 @@ final class BackgroundAgent: ObservableObject {
                         Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue()
                         as? [String] ?? []
                     let flagsArr = Array(UnsafeBufferPointer(start: eventFlags, count: numEvents))
-                    Task { @MainActor in agent.onFSEvents(paths: paths, flags: flagsArr) }
+                    let ids = Array(UnsafeBufferPointer(start: eventIds, count: numEvents))
+                    Task { @MainActor in
+                        agent.onFSEvents(paths: paths, flags: flagsArr, eventIds: ids)
+                    }
                 },
                 &context,
                 [root] as CFArray,
-                FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+                since,
                 10.0,  // latency 초
                 flags)
         else {
@@ -188,12 +222,16 @@ final class BackgroundAgent: ObservableObject {
         FSEventStreamSetDispatchQueue(stream, DispatchQueue.global(qos: .background))
         FSEventStreamStart(stream)
         eventStream = stream
-        status = "실시간 감시 중 — \(URL(fileURLWithPath: root).lastPathComponent)"
-        // 시작 시 1회 기준값 확보.
-        scheduleRecompute(delay: 2)
+        if lastHandle == nil {
+            status = "실시간 감시 중 — 기준 스캔 준비"
+            scheduleRecompute(delay: 2)
+        } else if Date().timeIntervalSince(lastFullScanAt) >= Self.rebaseInterval {
+            scheduleRecompute(delay: 2)
+        }
     }
 
     private func stopLiveWatch() {
+        streamGeneration &+= 1
         if let stream = eventStream {
             FSEventStreamStop(stream)
             FSEventStreamInvalidate(stream)
@@ -206,16 +244,24 @@ final class BackgroundAgent: ObservableObject {
         // 증분 베이스 해제 — live 모드 밖에서는 트리를 상주시키지 않는다.
         lastHandle = nil
         pendingPaths = []
+        pendingEventCursor = 0
+        isRecomputing = false
     }
 
     /// 이벤트 수신 — 즉시 재집계하지 않고 debounce. IO 폭주 시 오히려 배치가 커져 효율적.
     /// 변경 디렉토리 경로를 누적하고, 위험 플래그는 풀스캔 강등으로 표시한다 (M4).
-    private func onFSEvents(paths: [String], flags: [FSEventStreamEventFlags]) {
+    private func onFSEvents(
+        paths: [String], flags: [FSEventStreamEventFlags],
+        eventIds: [FSEventStreamEventId]
+    ) {
         for (i, path) in paths.enumerated() {
             if i < flags.count && flags[i] & Self.degradeFlags != 0 {
                 forceFullScan = true
             }
             pendingPaths.insert(path)
+        }
+        if let newest = eventIds.max() {
+            pendingEventCursor = max(pendingEventCursor, UInt64(newest))
         }
         if paths.isEmpty { forceFullScan = true }  // 경로 추출 실패 — 보수적으로 풀스캔
         if pendingSince == nil { pendingSince = Date() }
@@ -242,6 +288,7 @@ final class BackgroundAgent: ObservableObject {
 
     private func recompute() async {
         guard !watchRoot.isEmpty else { return }
+        let generation = streamGeneration
         isRecomputing = true
         pendingSince = nil
         let root = watchRoot
@@ -249,6 +296,8 @@ final class BackgroundAgent: ObservableObject {
         // 이번 배치의 변경 경로를 소비 (재집계 중 도착분은 다음 배치로 — 누락 없음).
         let batch = Array(pendingPaths)
         pendingPaths = []
+        let batchCursor = pendingEventCursor
+        pendingEventCursor = 0
         let mustFull = forceFullScan
         forceFullScan = false
 
@@ -256,15 +305,17 @@ final class BackgroundAgent: ObservableObject {
         let rebaseDue =
             incrementalCount >= Self.rebaseEveryIncrements
             || Date().timeIntervalSince(lastFullScanAt) >= Self.rebaseInterval
-        let canIncremental = !mustFull && !rebaseDue && !batch.isEmpty && lastHandle != nil
+        let canIncremental =
+            !mustFull && !rebaseDue && !batch.isEmpty && batchCursor > 0 && lastHandle != nil
 
         var handle: ScanHandle?
         var statusLabel = ""
+        var completedFullScan = false
         if canIncremental, let prev = lastHandle {
             let report = try? await Task.detached(priority: .background) {
                 try prev.rescanPaths(
                     paths: batch, minFileMib: AppModel.scanRecordMinFileMib,
-                    dbPath: AppModel.dbPath)
+                    dbPath: AppModel.dbPath, fseventCursor: batchCursor)
             }.value
             if let report {
                 handle = report.handle
@@ -280,21 +331,33 @@ final class BackgroundAgent: ObservableObject {
         }
         if handle == nil {
             // 풀스캔 경로 (최초/강등/재베이스/증분 실패).
+            // 시작 직전 cursor를 저장하면 스캔 도중 이벤트도 다음 batch에서 재반영된다.
+            let checkpoint = UInt64(FSEventsGetCurrentEventId())
             handle = try? await Task.detached(priority: .background) {
                 // 스냅샷도 저장해 '변화' 탭에 축적.
-                try scanAndSave(
+                try scanAndSaveWithCursor(
                     path: root, minFileMib: AppModel.scanRecordMinFileMib,
-                    dbPath: AppModel.dbPath)
+                    dbPath: AppModel.dbPath, fseventCursor: checkpoint)
             }.value
-            incrementalCount = 0
-            lastFullScanAt = Date()
+            completedFullScan = handle != nil
             if statusLabel.isEmpty { statusLabel = rebaseDue ? "재베이스 풀스캔" : "풀스캔" }
         }
 
+        // stop/restart 중 완료된 이전 세대 결과는 현재 watcher 상태를 건드리지 않는다.
+        guard generation == streamGeneration, root == watchRoot else { return }
         isRecomputing = false
         guard let handle else {
             status = "재집계 실패"
+            // DB cursor가 전진하지 않았으므로 현재 session에서도 같은 변경을 다시 시도한다.
+            pendingPaths.formUnion(batch)
+            pendingEventCursor = max(pendingEventCursor, batchCursor)
+            forceFullScan = true
+            scheduleRecompute(delay: 60)
             return
+        }
+        if completedFullScan {
+            incrementalCount = 0
+            lastFullScanAt = Date()
         }
         lastHandle = handle
         let total = (try? handle.nodeAt(indexPath: []).allocatedSize) ?? 0

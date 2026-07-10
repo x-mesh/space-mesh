@@ -42,6 +42,7 @@ enum SelfTest {
             failures.append(contentsOf: testDuplicates())
             failures.append(contentsOf: testTrashUndo())
             failures.append(contentsOf: testSnapshotDiff())
+            failures.append(contentsOf: testPersistentIncremental())
             failures.append(contentsOf: testCliPath())
             failures.append(contentsOf: testGitRepos())
             if failures.isEmpty {
@@ -54,6 +55,55 @@ enum SelfTest {
         } catch {
             print("SELFTEST ERROR: \(error)")
             exit(1)
+        }
+    }
+
+    /// cursor+hardlink registry 저장 → 재로드 → subtree 증분 병합을 FFI 경계까지 검증.
+    private static func testPersistentIncremental() -> [String] {
+        let fm = FileManager.default
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let tmp = fm.temporaryDirectory.appendingPathComponent("space-mesh-resume-\(pid)")
+        let db = fm.temporaryDirectory.appendingPathComponent("space-mesh-resume-\(pid).db")
+        defer {
+            try? fm.removeItem(at: tmp)
+            try? fm.removeItem(at: db)
+            try? fm.removeItem(atPath: db.path + "-wal")
+            try? fm.removeItem(atPath: db.path + "-shm")
+        }
+        do {
+            let sub = tmp.appendingPathComponent("sub")
+            try fm.createDirectory(at: sub, withIntermediateDirectories: true)
+            let original = sub.appendingPathComponent("original.bin")
+            try Data(repeating: 7, count: 20_000).write(to: original)
+            try fm.linkItem(at: original, to: sub.appendingPathComponent("linked.bin"))
+
+            _ = try scanAndSaveWithCursor(
+                path: tmp.path, minFileMib: 1, dbPath: db.path, fseventCursor: 123)
+            let restored = try loadSnapshotState(dbPath: db.path, rootPath: tmp.path)
+            guard restored.incrementalReady, restored.fseventCursor == 123 else {
+                return [
+                    "resume: state ready=\(restored.incrementalReady) cursor=\(restored.fseventCursor)"
+                ]
+            }
+
+            try Data(repeating: 3, count: 30_000)
+                .write(to: sub.appendingPathComponent("added.bin"))
+            let report = try restored.handle.rescanPaths(
+                paths: [sub.path], minFileMib: 1, dbPath: db.path, fseventCursor: 124)
+            if report.degraded {
+                return ["resume: 증분 병합이 full scan으로 강등됨 — \(report.degradeReason)"]
+            }
+            let saved = try loadSnapshotState(dbPath: db.path, rootPath: tmp.path)
+            if saved.fseventCursor != 124 {
+                return ["resume: 갱신 cursor=\(saved.fseventCursor) != 124"]
+            }
+            if saved.handle.stats().totalFiles != 2 {
+                // hardlink 두 경로는 하나로 집계하고 added.bin을 더해 총 2개다.
+                return ["resume: totalFiles=\(saved.handle.stats().totalFiles) != 2"]
+            }
+            return []
+        } catch {
+            return ["resume: \(error)"]
         }
     }
 

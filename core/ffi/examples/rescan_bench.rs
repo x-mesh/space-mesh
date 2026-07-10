@@ -29,7 +29,7 @@ fn main() {
     for i in 1..=3 {
         let t = Instant::now();
         let report = handle
-            .rescan_paths(targets.clone(), 10, db.clone())
+            .rescan_paths(targets.clone(), 10, db.clone(), 0)
             .expect("rescan failed");
         let secs = t.elapsed().as_secs_f64();
         let rs = report.handle.stats();

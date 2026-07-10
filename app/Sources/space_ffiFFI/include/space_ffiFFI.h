@@ -333,7 +333,7 @@ RustBuffer uniffi_space_ffi_fn_method_scanhandle_reclaim_summary(void*_Nonnull p
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_RESCAN_PATHS
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_RESCAN_PATHS
-RustBuffer uniffi_space_ffi_fn_method_scanhandle_rescan_paths(void*_Nonnull ptr, RustBuffer paths, uint64_t min_file_mib, RustBuffer db_path, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_space_ffi_fn_method_scanhandle_rescan_paths(void*_Nonnull ptr, RustBuffer paths, uint64_t min_file_mib, RustBuffer db_path, uint64_t fsevent_cursor, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_STALE_FILES
@@ -381,6 +381,11 @@ RustBuffer uniffi_space_ffi_fn_func_list_snapshots(RustBuffer db_path, RustBuffe
 void*_Nonnull uniffi_space_ffi_fn_func_load_snapshot(RustBuffer db_path, RustBuffer root_path, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_LOAD_SNAPSHOT_STATE
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_LOAD_SNAPSHOT_STATE
+RustBuffer uniffi_space_ffi_fn_func_load_snapshot_state(RustBuffer db_path, RustBuffer root_path, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_OPEN_DIFF
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_OPEN_DIFF
 void*_Nonnull uniffi_space_ffi_fn_func_open_diff(RustBuffer db_path, int64_t old_id, int64_t new_id, RustCallStatus *_Nonnull out_status
@@ -389,6 +394,11 @@ void*_Nonnull uniffi_space_ffi_fn_func_open_diff(RustBuffer db_path, int64_t old
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_SCAN_AND_SAVE
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_SCAN_AND_SAVE
 void*_Nonnull uniffi_space_ffi_fn_func_scan_and_save(RustBuffer path, uint64_t min_file_mib, RustBuffer db_path, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_SCAN_AND_SAVE_WITH_CURSOR
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_SCAN_AND_SAVE_WITH_CURSOR
+void*_Nonnull uniffi_space_ffi_fn_func_scan_and_save_with_cursor(RustBuffer path, uint64_t min_file_mib, RustBuffer db_path, uint64_t fsevent_cursor, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_SCAN_PATH
@@ -724,6 +734,12 @@ uint16_t uniffi_space_ffi_checksum_func_load_snapshot(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_LOAD_SNAPSHOT_STATE
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_LOAD_SNAPSHOT_STATE
+uint16_t uniffi_space_ffi_checksum_func_load_snapshot_state(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_OPEN_DIFF
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_OPEN_DIFF
 uint16_t uniffi_space_ffi_checksum_func_open_diff(void
@@ -733,6 +749,12 @@ uint16_t uniffi_space_ffi_checksum_func_open_diff(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_SCAN_AND_SAVE
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_SCAN_AND_SAVE
 uint16_t uniffi_space_ffi_checksum_func_scan_and_save(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_SCAN_AND_SAVE_WITH_CURSOR
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_SCAN_AND_SAVE_WITH_CURSOR
+uint16_t uniffi_space_ffi_checksum_func_scan_and_save_with_cursor(void
     
 );
 #endif

@@ -1,3 +1,4 @@
+import CoreServices
 import Foundation
 import SpaceMeshCore
 
@@ -32,28 +33,39 @@ final class AppModel: ObservableObject {
         guard !isScanning else { return }
         isScanning = true
         errorMessage = nil
+        scanSeconds = nil
         let started = Date()
         scanStartedAt = started
         Task {
+            // 캐시 로드와 fresh scan을 동시에 시작한다. warm start는 캐시가 먼저 화면을 채운다.
+            let freshTask = Task { try await Self.runScan(path: path) }
+            if let cached = await Self.loadCached(path: path) {
+                self.apply(handle: cached, path: path)
+                self.reclaimSummary = nil
+            }
             do {
-                let handle = try await Self.runScan(path: path)
-                self.handle = handle
-                self.scannedRoot = path
-                self.stats = handle.stats()
+                let handle = try await freshTask.value
+                self.apply(handle: handle, path: path)
                 self.scanSeconds = Date().timeIntervalSince(started)
-                self.indexPath = []
-                self.breadcrumb = []
-                self.rootAllocated = (try? handle.nodeAt(indexPath: []).allocatedSize) ?? 0
-                self.staleFiles = handle.staleFiles(limit: 20, minAgeDays: Self.staleAgeDays)
                 self.reclaimSummary = await Task.detached(priority: .utility) {
                     handle.reclaimSummary()
                 }.value
-                self.reload()
             } catch {
                 self.errorMessage = "\(error)"
             }
             self.isScanning = false
         }
+    }
+
+    private func apply(handle: ScanHandle, path: String) {
+        self.handle = handle
+        self.scannedRoot = path
+        self.stats = handle.stats()
+        self.indexPath = []
+        self.breadcrumb = []
+        self.rootAllocated = (try? handle.nodeAt(indexPath: []).allocatedSize) ?? 0
+        self.staleFiles = handle.staleFiles(limit: 20, minAgeDays: Self.staleAgeDays)
+        self.reload()
     }
 
     /// 방치 파일로 간주하는 최소 경과일.
@@ -79,11 +91,20 @@ final class AppModel: ObservableObject {
     private nonisolated static func runScan(path: String) async throws -> ScanHandle {
         try await Task.detached(priority: .userInitiated) {
             do {
-                return try scanAndSave(
-                    path: path, minFileMib: Self.scanRecordMinFileMib, dbPath: Self.dbPath)
+                // 스캔 도중 발생한 변경은 이 cursor 이후 journal replay로 다시 반영된다.
+                let cursor = UInt64(FSEventsGetCurrentEventId())
+                return try scanAndSaveWithCursor(
+                    path: path, minFileMib: Self.scanRecordMinFileMib,
+                    dbPath: Self.dbPath, fseventCursor: cursor)
             } catch {
                 return try scanPath(path: path, minFileMib: Self.scanRecordMinFileMib)
             }
+        }.value
+    }
+
+    private nonisolated static func loadCached(path: String) async -> ScanHandle? {
+        await Task.detached(priority: .userInitiated) {
+            try? loadSnapshot(dbPath: Self.dbPath, rootPath: path)
         }.value
     }
 
