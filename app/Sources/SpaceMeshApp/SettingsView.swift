@@ -29,7 +29,13 @@ struct SettingsView: View {
                         }
                     }
                     .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(Theme.accent)
                     .frame(width: 130)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Theme.raised, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.border, lineWidth: 1))
                 }
                 .padding(.leading, 4)
             }
