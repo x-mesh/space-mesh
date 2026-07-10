@@ -145,7 +145,7 @@ struct ScanningView: View {
     private func drawSweep(
         ctx: inout GraphicsContext, center: CGPoint, radius: CGFloat, beamAngle: Double
     ) {
-        let beamRad = Angle(degrees: beamAngle).radians
+        let beamRad = CGFloat(Angle(degrees: beamAngle).radians)
         // 잔광 부채꼴 (여러 겹으로 페이드)
         let trailSteps = 24
         let trailSpan = 70.0
