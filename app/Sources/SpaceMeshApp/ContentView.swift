@@ -83,11 +83,10 @@ struct ContentView: View {
 
     @ViewBuilder
     private var detail: some View {
-        ZStack {
-            MoonBackdrop()
-                .opacity(0.52)
-                .overlay(Color.black.opacity(0.34))
-                .clipped()
+        // 달 배경은 .background로 둔다. ZStack 형제로 놓으면 scaledToFill이
+        // 콘텐츠보다 큰 레이아웃 크기를 보고해 detail 폭을 넘겨버리고,
+        // 그 결과 좁은 창에서 트리맵·인스펙터가 양쪽으로 잘린다.
+        Group {
             switch selection {
             case .treemap:
                 treemapSection
@@ -105,6 +104,13 @@ struct ContentView: View {
                 StaleView(cleanup: cleanup)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background {
+            MoonBackdrop()
+                .opacity(0.52)
+                .overlay(Color.black.opacity(0.34))
+        }
+        .clipped()
     }
 
     // MARK: - 사이드바 (job 단계: 진단 → 회수 → 안전)
