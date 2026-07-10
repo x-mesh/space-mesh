@@ -10,6 +10,8 @@
     <string>SpaceMeshApp</string>
     <key>CFBundleIdentifier</key>
     <string>com.x-mesh.space-mesh</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
