@@ -14,6 +14,7 @@ struct CategoriesView: View {
     @State private var selected: Set<String> = []
     @State private var confirmTrash = false
     @State private var loadedForPath: String = ""
+    @State private var isLoading = false
 
     private var grouped: [(id: String, title: String, safety: String, description: String, items: [CategoryHitInfo])] {
         var order: [String] = []
@@ -58,6 +59,15 @@ struct CategoriesView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if appModel.isScanning {
                 ScanningView(startedAt: appModel.scanStartedAt, label: "스캔 중")
+            } else if isLoading {
+                // categories()는 스캔 트리를 순회하며 마커를 검증한다. 느린 머신에선
+                // 수 초가 걸려 스피너 없이는 "산출물 없음" 빈 상태처럼 보여 행으로 오인된다.
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.large)
+                    InstrumentLabel(text: "빌드 산출물 분석 중")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if hits.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "checkmark.seal")
@@ -110,10 +120,12 @@ struct CategoriesView: View {
     private func reload() {
         guard let handle = appModel.handle else { return }
         selected = []
+        isLoading = true
         Task {
             let found = await Task.detached { handle.categories() }.value
             self.hits = found
             self.loadedForPath = appModel.scannedRoot
+            self.isLoading = false
         }
     }
 
