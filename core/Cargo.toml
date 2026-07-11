@@ -3,7 +3,7 @@ resolver = "2"
 members = ["scanner", "index", "rules", "dedup", "git", "ffi", "cli"]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 
 [workspace.dependencies]
