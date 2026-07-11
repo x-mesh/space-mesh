@@ -15,6 +15,9 @@ struct CategoriesView: View {
     @State private var confirmTrash = false
     @State private var loadedForPath: String = ""
     @State private var isLoading = false
+    /// 펼쳐진 카테고리 id 집합. 카테고리가 많으면 항목이 요약을 파묻으므로 기본은 접어둔다.
+    /// key는 categoryId — hit.path를 키로 쓰는 `selected`와 도메인이 다르다.
+    @State private var expanded: Set<String> = []
 
     private var grouped: [(id: String, title: String, safety: String, description: String, items: [CategoryHitInfo])] {
         var order: [String] = []
@@ -126,7 +129,18 @@ struct CategoriesView: View {
             self.hits = found
             self.loadedForPath = appModel.scannedRoot
             self.isLoading = false
+            // 반드시 hits 대입 이후. grouped는 hits에서 파생되므로, 앞에서 계산하면
+            // 직전 스캔 데이터 기준으로 1위를 잘못 고른다.
+            self.expanded = defaultExpanded()
         }
+    }
+
+    /// 기본 펼침 정책 — 용량 1위 카테고리 하나만 펼친다.
+    /// "뭐가 제일 큰가"를 클릭 없이 보여주면서 나머지는 접어 스크롤 압박을 없앤다.
+    /// 항목이 하나뿐인 카테고리는 애초에 접지 않으므로(항상 렌더) 집합에 넣지 않는다.
+    private func defaultExpanded() -> Set<String> {
+        guard let top = grouped.first, top.items.count > 1 else { return [] }
+        return [top.id]
     }
 
     private var summaryHeader: some View {
@@ -160,9 +174,13 @@ struct CategoriesView: View {
         List {
             ForEach(grouped, id: \.id) { group in
                 Section {
-                    ForEach(group.items, id: \.path) { hit in
-                        hitRow(hit)
-                            .listRowBackground(Theme.bg)
+                    // 항목이 하나뿐이면 접기 대상이 아니다 — expanded 집합이 아니라 렌더 조건으로
+                    // 처리해야 1개짜리가 집합에 끼어드는 경우를 아예 만들지 않는다.
+                    if group.items.count <= 1 || expanded.contains(group.id) {
+                        ForEach(group.items, id: \.path) { hit in
+                            hitRow(hit)
+                                .listRowBackground(Theme.bg)
+                        }
                     }
                 } header: {
                     categoryHeader(group)
@@ -179,8 +197,33 @@ struct CategoriesView: View {
         _ group: (id: String, title: String, safety: String, description: String, items: [CategoryHitInfo])
     ) -> some View {
         let groupSize = group.items.reduce(UInt64(0)) { $0 + $1.allocatedSize }
+        let isExpanded = expanded.contains(group.id)
+        let collapsible = group.items.count > 1
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
+                if collapsible {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            if isExpanded {
+                                expanded.remove(group.id)
+                            } else {
+                                expanded.insert(group.id)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.textDim)
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .frame(width: 12)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(isExpanded ? "접기" : "펼치기")
+                } else {
+                    // 항목이 하나뿐이면 접을 이유가 없다. 자리만 비워 아이콘 열을 정렬한다.
+                    Color.clear.frame(width: 12, height: 1)
+                }
                 Image(systemName: Self.icon(for: group.id))
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Theme.accent)
