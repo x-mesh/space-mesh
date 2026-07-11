@@ -106,9 +106,15 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
+            // scaledToFill 달 이미지(16:9)는 좁은 창에서 detail보다 가로로 넘친다.
+            // .clipped()는 그리기만 자르고 hit-testing은 안 자르며, detail은
+            // HStack에서 사이드바보다 뒤(위)에 그려진다 — 그래서 눈엔 안 보이는
+            // 좌측 초과분이 왼쪽 '회수' 메뉴들의 클릭을 가로챈다. 장식 배경이므로
+            // 아예 hit-testing에서 제외한다.
             MoonBackdrop()
                 .opacity(0.52)
                 .overlay(Color.black.opacity(0.34))
+                .allowsHitTesting(false)
         }
         .clipped()
     }
