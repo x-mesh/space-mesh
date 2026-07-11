@@ -1437,9 +1437,22 @@ public struct CleanupCandidate {
      */
     public var safety: String
     public var description: String
+    /**
+     * 화면에 보여줄 위치.
+     */
     public var path: String
+    /**
+     * 이 항목만의 크기 — 다른 항목이 안쪽을 따로 잡고 있으면 그만큼 빠져 있다.
+     * 항목들이 서로 겹치지 않으므로 그냥 더해도 실제 회수량과 맞는다.
+     */
     public var allocatedSize: UInt64
     public var fileCount: UInt64
+    /**
+     * 실제로 휴지통에 보낼 경로들. 보통 `path` 하나지만, 다른 항목이 안쪽을 따로
+     * 잡고 있으면 그 자식들을 뺀 나머지가 들어온다 — **삭제는 반드시 이걸 써야 한다.**
+     * `path`를 지우면 따로 고를 수 있어야 할 항목까지 함께 날아간다.
+     */
+    public var deletePaths: [String]
     public var recreateCommand: String
     public var recreateCost: String
 
@@ -1448,7 +1461,19 @@ public struct CleanupCandidate {
     public init(ruleId: String, title: String, category: String, 
         /**
          * "safe" = 원클릭 정리 가능, "warn" = 검토 필요.
-         */safety: String, description: String, path: String, allocatedSize: UInt64, fileCount: UInt64, recreateCommand: String, recreateCost: String) {
+         */safety: String, description: String, 
+        /**
+         * 화면에 보여줄 위치.
+         */path: String, 
+        /**
+         * 이 항목만의 크기 — 다른 항목이 안쪽을 따로 잡고 있으면 그만큼 빠져 있다.
+         * 항목들이 서로 겹치지 않으므로 그냥 더해도 실제 회수량과 맞는다.
+         */allocatedSize: UInt64, fileCount: UInt64, 
+        /**
+         * 실제로 휴지통에 보낼 경로들. 보통 `path` 하나지만, 다른 항목이 안쪽을 따로
+         * 잡고 있으면 그 자식들을 뺀 나머지가 들어온다 — **삭제는 반드시 이걸 써야 한다.**
+         * `path`를 지우면 따로 고를 수 있어야 할 항목까지 함께 날아간다.
+         */deletePaths: [String], recreateCommand: String, recreateCost: String) {
         self.ruleId = ruleId
         self.title = title
         self.category = category
@@ -1457,6 +1482,7 @@ public struct CleanupCandidate {
         self.path = path
         self.allocatedSize = allocatedSize
         self.fileCount = fileCount
+        self.deletePaths = deletePaths
         self.recreateCommand = recreateCommand
         self.recreateCost = recreateCost
     }
@@ -1493,6 +1519,9 @@ extension CleanupCandidate: Equatable, Hashable {
         if lhs.fileCount != rhs.fileCount {
             return false
         }
+        if lhs.deletePaths != rhs.deletePaths {
+            return false
+        }
         if lhs.recreateCommand != rhs.recreateCommand {
             return false
         }
@@ -1511,6 +1540,7 @@ extension CleanupCandidate: Equatable, Hashable {
         hasher.combine(path)
         hasher.combine(allocatedSize)
         hasher.combine(fileCount)
+        hasher.combine(deletePaths)
         hasher.combine(recreateCommand)
         hasher.combine(recreateCost)
     }
@@ -1533,6 +1563,7 @@ public struct FfiConverterTypeCleanupCandidate: FfiConverterRustBuffer {
                 path: FfiConverterString.read(from: &buf), 
                 allocatedSize: FfiConverterUInt64.read(from: &buf), 
                 fileCount: FfiConverterUInt64.read(from: &buf), 
+                deletePaths: FfiConverterSequenceString.read(from: &buf), 
                 recreateCommand: FfiConverterString.read(from: &buf), 
                 recreateCost: FfiConverterString.read(from: &buf)
         )
@@ -1547,6 +1578,7 @@ public struct FfiConverterTypeCleanupCandidate: FfiConverterRustBuffer {
         FfiConverterString.write(value.path, into: &buf)
         FfiConverterUInt64.write(value.allocatedSize, into: &buf)
         FfiConverterUInt64.write(value.fileCount, into: &buf)
+        FfiConverterSequenceString.write(value.deletePaths, into: &buf)
         FfiConverterString.write(value.recreateCommand, into: &buf)
         FfiConverterString.write(value.recreateCost, into: &buf)
     }

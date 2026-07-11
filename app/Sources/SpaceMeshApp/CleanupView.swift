@@ -10,8 +10,21 @@ struct CleanupView: View {
     private var selected: [CleanupCandidate] {
         model.candidates.filter { model.selectedCleanupPaths.contains($0.path) }
     }
+    /// 항목들은 서로 겹치지 않는다 (core에서 안쪽 항목을 빼둔다) — 그래서 그냥 더해도
+    /// 실제로 비워지는 용량과 맞는다. 예전에는 ~/Library/Caches와 그 안의 Homebrew 캐시를
+    /// 각각 세서 회수량을 22 GB 넘게 부풀려 말했다.
     private var selectedSize: UInt64 {
         selected.reduce(0) { $0 + $1.allocatedSize }
+    }
+
+    /// 실제 삭제 대상. 한 항목이 여러 경로로 쪼개질 수 있다 ("기타 앱 캐시"의 나머지 항목들).
+    /// 크기는 항목당 한 번만 실어 합계가 두 배로 잡히지 않게 한다.
+    private func trashTargets() -> [(path: String, size: UInt64)] {
+        selected.flatMap { candidate -> [(path: String, size: UInt64)] in
+            candidate.deletePaths.enumerated().map { index, path in
+                (path: path, size: index == 0 ? candidate.allocatedSize : 0)
+            }
+        }
     }
 
     var body: some View {
@@ -55,7 +68,10 @@ struct CleanupView: View {
             isPresented: $confirmTrash, titleVisibility: .visible
         ) {
             Button("휴지통으로 이동", role: .destructive) {
-                model.trash(paths: selected.map { ($0.path, $0.allocatedSize) })
+                // path가 아니라 deletePaths를 지운다. "기타 앱 캐시"의 path는
+                // ~/Library/Caches이고, 그걸 통째로 지우면 따로 고를 수 있어야 할
+                // Homebrew·pip·Yarn 캐시까지 함께 날아간다.
+                model.trash(paths: trashTargets())
                 model.detect()
             }
         } message: {

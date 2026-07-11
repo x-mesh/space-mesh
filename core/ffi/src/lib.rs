@@ -466,9 +466,16 @@ pub struct CleanupCandidate {
     /// "safe" = 원클릭 정리 가능, "warn" = 검토 필요.
     pub safety: String,
     pub description: String,
+    /// 화면에 보여줄 위치.
     pub path: String,
+    /// 이 항목만의 크기 — 다른 항목이 안쪽을 따로 잡고 있으면 그만큼 빠져 있다.
+    /// 항목들이 서로 겹치지 않으므로 그냥 더해도 실제 회수량과 맞는다.
     pub allocated_size: u64,
     pub file_count: u64,
+    /// 실제로 휴지통에 보낼 경로들. 보통 `path` 하나지만, 다른 항목이 안쪽을 따로
+    /// 잡고 있으면 그 자식들을 뺀 나머지가 들어온다 — **삭제는 반드시 이걸 써야 한다.**
+    /// `path`를 지우면 따로 고를 수 있어야 할 항목까지 함께 날아간다.
+    pub delete_paths: Vec<String>,
     pub recreate_command: String,
     pub recreate_cost: String,
 }
@@ -487,6 +494,11 @@ pub fn detect_cleanup(home: String) -> Vec<CleanupCandidate> {
             path: c.resolved_path.to_string_lossy().into_owned(),
             allocated_size: c.allocated_size,
             file_count: c.file_count,
+            delete_paths: c
+                .delete_paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
             recreate_command: c.rule.recreate_command,
             recreate_cost: c.rule.recreate_cost,
         })
