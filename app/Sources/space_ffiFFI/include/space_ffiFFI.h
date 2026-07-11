@@ -351,6 +351,11 @@ RustBuffer uniffi_space_ffi_fn_method_scanhandle_stats(void*_Nonnull ptr, RustCa
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_top_files(void*_Nonnull ptr, uint32_t limit, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_APP_DATA_SIZE
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_APP_DATA_SIZE
+uint64_t uniffi_space_ffi_fn_func_app_data_size(RustBuffer bundle_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_DETECT_CLEANUP
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_DETECT_CLEANUP
 RustBuffer uniffi_space_ffi_fn_func_detect_cleanup(RustBuffer home, RustCallStatus *_Nonnull out_status
@@ -369,6 +374,12 @@ RustBuffer uniffi_space_ffi_fn_func_find_duplicates(RustBuffer root, uint64_t mi
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_GIT_ACTIVITY
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_GIT_ACTIVITY
 RustBuffer uniffi_space_ffi_fn_func_git_activity(RustBuffer repo_path, uint32_t weeks, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_LIST_APPS
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_LIST_APPS
+RustBuffer uniffi_space_ffi_fn_func_list_apps(RustCallStatus *_Nonnull out_status
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_LIST_SNAPSHOTS
@@ -698,6 +709,12 @@ void ffi_space_ffi_rust_future_free_void(uint64_t handle
 void ffi_space_ffi_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_APP_DATA_SIZE
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_APP_DATA_SIZE
+uint16_t uniffi_space_ffi_checksum_func_app_data_size(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_DETECT_CLEANUP
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_DETECT_CLEANUP
 uint16_t uniffi_space_ffi_checksum_func_detect_cleanup(void
@@ -719,6 +736,12 @@ uint16_t uniffi_space_ffi_checksum_func_find_duplicates(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_GIT_ACTIVITY
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_GIT_ACTIVITY
 uint16_t uniffi_space_ffi_checksum_func_git_activity(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_LIST_APPS
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_LIST_APPS
+uint16_t uniffi_space_ffi_checksum_func_list_apps(void
     
 );
 #endif

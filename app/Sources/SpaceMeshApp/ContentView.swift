@@ -8,7 +8,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     // 진단: 어디가 크고, 뭐가 늘었나
     case treemap, changes
     // 회수: 뭘 지울까
-    case categories, duplicates, stale, cleanup
+    case categories, apps, duplicates, stale, cleanup
     // 안전: 지워도 되나
     case git
 
@@ -19,6 +19,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .treemap: return "트리맵"
         case .changes: return "변화"
         case .categories: return "빌드 산출물"
+        case .apps: return "앱"
         case .duplicates: return "중복"
         case .stale: return "미수정 180일+"
         case .cleanup: return "캐시·도구"
@@ -31,6 +32,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .treemap: return "square.grid.3x3.topleft.filled"
         case .changes: return "clock.arrow.circlepath"
         case .categories: return "hammer"
+        case .apps: return "square.grid.2x2"
         case .duplicates: return "doc.on.doc"
         case .stale: return "clock.badge.exclamationmark"
         case .cleanup: return "sparkles"
@@ -42,7 +44,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 /// 사이드바 그룹 정의 (표시 순서 고정).
 private let sidebarGroups: [(title: String, items: [SidebarItem])] = [
     ("진단", [.treemap, .changes]),
-    ("회수", [.categories, .duplicates, .stale, .cleanup]),
+    ("회수", [.categories, .apps, .duplicates, .stale, .cleanup]),
     ("안전", [.git]),
 ]
 
@@ -94,6 +96,8 @@ struct ContentView: View {
                 ChangesView(scanTarget: scanTarget)
             case .categories:
                 CategoriesView(model: cleanup, scanTarget: scanTarget)
+            case .apps:
+                AppsView(model: cleanup)
             case .git:
                 GitView(scanTarget: scanTarget)
             case .cleanup:

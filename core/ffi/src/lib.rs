@@ -1156,3 +1156,56 @@ fn describe(h: &space_git::RepoHealth) -> (String, u64, bool) {
 pub fn git_activity(repo_path: String, weeks: u32) -> Vec<u64> {
     space_git::activity(std::path::Path::new(&repo_path), weeks as u64)
 }
+
+// ───────────────────────── 앱 회계 (/Applications) ─────────────────────────
+
+/// 설치된 앱 한 개. 크기와 "마지막으로 쓴 날"을 함께 들고 있어야
+/// "크고 안 쓰는 앱"이라는 판단이 선다.
+#[derive(uniffi::Record)]
+pub struct AppInfo {
+    pub name: String,
+    pub path: String,
+    pub bundle_id: String,
+    /// 번들 크기 — 지우면 실제로 돌아오는 용량.
+    pub allocated_size: u64,
+    /// 마지막 사용으로부터 지난 일수.
+    /// `None`은 "안 씀"이 아니라 **"기록 없음"**이다 — UI에서 둘을 같은 배지로 묶으면 안 된다.
+    pub last_used_days: Option<u64>,
+    /// "brew" | "mas" | "unknown"
+    pub source: String,
+    /// 되돌리는 방법. 비어 있으면 UI가 "복원 명령 불명" 경고를 띄운다.
+    pub recreate_command: String,
+    /// Apple 시스템 앱(Safari 등) — 삭제를 막아야 한다.
+    /// App Store로 받은 Xcode는 여기 해당하지 않는다(재설치 가능).
+    pub is_apple: bool,
+}
+
+/// /Applications의 앱 목록. `ScanHandle` 메서드가 아니라 독립 함수다 —
+/// 앱 목록은 스캔 트리와 무관하므로 스캔하지 않은 상태에서도 뷰를 열 수 있어야 한다.
+///
+/// 45 GiB를 실제로 훑으므로 2~3초가 걸린다. 호출부는 백그라운드로 돌리고 스피너를 띄울 것.
+#[uniffi::export]
+pub fn list_apps() -> Vec<AppInfo> {
+    space_rules::apps::list_apps()
+        .into_iter()
+        .map(|a| AppInfo {
+            name: a.name,
+            path: a.path.to_string_lossy().into_owned(),
+            bundle_id: a.bundle_id,
+            allocated_size: a.allocated_size,
+            last_used_days: a.last_used_days,
+            source: a.source,
+            recreate_command: a.recreate_command,
+            is_apple: a.is_apple,
+        })
+        .collect()
+}
+
+/// 그 앱 전용 ~/Library 데이터의 크기. **표시 전용 — 삭제하지 않는다.**
+///
+/// 목록을 만들 때 101개를 전부 계산하면 4초가 더 든다(번들 스캔보다 비싸다).
+/// 그래서 사용자가 앱을 고른 순간에만 부른다.
+#[uniffi::export]
+pub fn app_data_size(bundle_id: String) -> u64 {
+    space_rules::apps::app_data_size(&bundle_id)
+}

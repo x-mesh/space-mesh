@@ -5,6 +5,7 @@
 //! (계획상 YAML이었으나 serde_yaml 미유지보수로 JSON 채택.)
 
 pub mod advisor;
+pub mod apps;
 pub mod categories;
 
 use rayon::prelude::*;

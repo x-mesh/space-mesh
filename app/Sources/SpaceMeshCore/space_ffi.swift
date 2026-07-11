@@ -1024,6 +1024,162 @@ public func FfiConverterTypeScanHandle_lower(_ value: ScanHandle) -> UnsafeMutab
 
 
 
+/**
+ * 설치된 앱 한 개. 크기와 "마지막으로 쓴 날"을 함께 들고 있어야
+ * "크고 안 쓰는 앱"이라는 판단이 선다.
+ */
+public struct AppInfo {
+    public var name: String
+    public var path: String
+    public var bundleId: String
+    /**
+     * 번들 크기 — 지우면 실제로 돌아오는 용량.
+     */
+    public var allocatedSize: UInt64
+    /**
+     * 마지막 사용으로부터 지난 일수.
+     * `None`은 "안 씀"이 아니라 **"기록 없음"**이다 — UI에서 둘을 같은 배지로 묶으면 안 된다.
+     */
+    public var lastUsedDays: UInt64?
+    /**
+     * "brew" | "mas" | "unknown"
+     */
+    public var source: String
+    /**
+     * 되돌리는 방법. 비어 있으면 UI가 "복원 명령 불명" 경고를 띄운다.
+     */
+    public var recreateCommand: String
+    /**
+     * Apple 시스템 앱(Safari 등) — 삭제를 막아야 한다.
+     * App Store로 받은 Xcode는 여기 해당하지 않는다(재설치 가능).
+     */
+    public var isApple: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(name: String, path: String, bundleId: String, 
+        /**
+         * 번들 크기 — 지우면 실제로 돌아오는 용량.
+         */allocatedSize: UInt64, 
+        /**
+         * 마지막 사용으로부터 지난 일수.
+         * `None`은 "안 씀"이 아니라 **"기록 없음"**이다 — UI에서 둘을 같은 배지로 묶으면 안 된다.
+         */lastUsedDays: UInt64?, 
+        /**
+         * "brew" | "mas" | "unknown"
+         */source: String, 
+        /**
+         * 되돌리는 방법. 비어 있으면 UI가 "복원 명령 불명" 경고를 띄운다.
+         */recreateCommand: String, 
+        /**
+         * Apple 시스템 앱(Safari 등) — 삭제를 막아야 한다.
+         * App Store로 받은 Xcode는 여기 해당하지 않는다(재설치 가능).
+         */isApple: Bool) {
+        self.name = name
+        self.path = path
+        self.bundleId = bundleId
+        self.allocatedSize = allocatedSize
+        self.lastUsedDays = lastUsedDays
+        self.source = source
+        self.recreateCommand = recreateCommand
+        self.isApple = isApple
+    }
+}
+
+#if compiler(>=6)
+extension AppInfo: Sendable {}
+#endif
+
+
+extension AppInfo: Equatable, Hashable {
+    public static func ==(lhs: AppInfo, rhs: AppInfo) -> Bool {
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.path != rhs.path {
+            return false
+        }
+        if lhs.bundleId != rhs.bundleId {
+            return false
+        }
+        if lhs.allocatedSize != rhs.allocatedSize {
+            return false
+        }
+        if lhs.lastUsedDays != rhs.lastUsedDays {
+            return false
+        }
+        if lhs.source != rhs.source {
+            return false
+        }
+        if lhs.recreateCommand != rhs.recreateCommand {
+            return false
+        }
+        if lhs.isApple != rhs.isApple {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(path)
+        hasher.combine(bundleId)
+        hasher.combine(allocatedSize)
+        hasher.combine(lastUsedDays)
+        hasher.combine(source)
+        hasher.combine(recreateCommand)
+        hasher.combine(isApple)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAppInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AppInfo {
+        return
+            try AppInfo(
+                name: FfiConverterString.read(from: &buf), 
+                path: FfiConverterString.read(from: &buf), 
+                bundleId: FfiConverterString.read(from: &buf), 
+                allocatedSize: FfiConverterUInt64.read(from: &buf), 
+                lastUsedDays: FfiConverterOptionUInt64.read(from: &buf), 
+                source: FfiConverterString.read(from: &buf), 
+                recreateCommand: FfiConverterString.read(from: &buf), 
+                isApple: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AppInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.bundleId, into: &buf)
+        FfiConverterUInt64.write(value.allocatedSize, into: &buf)
+        FfiConverterOptionUInt64.write(value.lastUsedDays, into: &buf)
+        FfiConverterString.write(value.source, into: &buf)
+        FfiConverterString.write(value.recreateCommand, into: &buf)
+        FfiConverterBool.write(value.isApple, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAppInfo_lift(_ buf: RustBuffer) throws -> AppInfo {
+    return try FfiConverterTypeAppInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAppInfo_lower(_ value: AppInfo) -> RustBuffer {
+    return FfiConverterTypeAppInfo.lower(value)
+}
+
+
 public struct BigFile {
     public var path: String
     public var logicalSize: UInt64
@@ -2849,6 +3005,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAppInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [AppInfo]
+
+    public static func write(_ value: [AppInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAppInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AppInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AppInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAppInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeBigFile: FfiConverterRustBuffer {
     typealias SwiftType = [BigFile]
 
@@ -3121,6 +3302,19 @@ fileprivate struct FfiConverterSequenceTypeToolAdviceInfo: FfiConverterRustBuffe
     }
 }
 /**
+ * 그 앱 전용 ~/Library 데이터의 크기. **표시 전용 — 삭제하지 않는다.**
+ *
+ * 목록을 만들 때 101개를 전부 계산하면 4초가 더 든다(번들 스캔보다 비싸다).
+ * 그래서 사용자가 앱을 고른 순간에만 부른다.
+ */
+public func appDataSize(bundleId: String) -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_space_ffi_fn_func_app_data_size(
+        FfiConverterString.lower(bundleId),$0
+    )
+})
+}
+/**
  * 내장 룰셋으로 홈 디렉토리의 정리 후보를 탐지한다. 블로킹 — 백그라운드에서 호출.
  */
 public func detectCleanup(home: String) -> [CleanupCandidate]  {
@@ -3163,6 +3357,18 @@ public func gitActivity(repoPath: String, weeks: UInt32) -> [UInt64]  {
     uniffi_space_ffi_fn_func_git_activity(
         FfiConverterString.lower(repoPath),
         FfiConverterUInt32.lower(weeks),$0
+    )
+})
+}
+/**
+ * /Applications의 앱 목록. `ScanHandle` 메서드가 아니라 독립 함수다 —
+ * 앱 목록은 스캔 트리와 무관하므로 스캔하지 않은 상태에서도 뷰를 열 수 있어야 한다.
+ *
+ * 45 GiB를 실제로 훑으므로 2~3초가 걸린다. 호출부는 백그라운드로 돌리고 스피너를 띄울 것.
+ */
+public func listApps() -> [AppInfo]  {
+    return try!  FfiConverterSequenceTypeAppInfo.lift(try! rustCall() {
+    uniffi_space_ffi_fn_func_list_apps($0
     )
 })
 }
@@ -3278,6 +3484,9 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_space_ffi_checksum_func_app_data_size() != 1694) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_space_ffi_checksum_func_detect_cleanup() != 24972) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3288,6 +3497,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_func_git_activity() != 6181) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_func_list_apps() != 48291) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_func_list_snapshots() != 46058) {
