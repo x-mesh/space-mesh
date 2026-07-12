@@ -55,6 +55,7 @@ struct ContentView: View {
     @State private var scanTarget = NSHomeDirectory()
     @State private var previewURL: URL?
     @State private var selection: SidebarItem = .treemap
+    @State private var fdaBannerDismissed = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -64,6 +65,10 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 toolbar
                 Rectangle().fill(Theme.border).frame(height: 1)
+                if showFdaBanner {
+                    fdaBanner
+                    Rectangle().fill(Theme.border).frame(height: 1)
+                }
                 HStack(spacing: 0) {
                     sidebarNav
                         .frame(width: sidebarWidth)
@@ -252,6 +257,54 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Full Disk Access 안내 (F9)
+
+    /// 권한 거부 스킵이 유의미하게 많으면 트리 전체가 과소 집계된다 — 숫자를 믿게
+    /// 하려면 못 읽은 게 있다는 사실부터 말해야 한다.
+    private var showFdaBanner: Bool {
+        guard !fdaBannerDismissed, let stats = model.stats else { return false }
+        return stats.permissionErrors >= Self.fdaBannerThreshold
+    }
+
+    /// 홈 디렉토리 스캔에서도 소수의 권한 거부는 정상이라 배너를 띄우지 않는다.
+    private static let fdaBannerThreshold: UInt64 = 50
+
+    private var fdaBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.warn)
+            Text(
+                "권한 거부로 \(model.stats.map { $0.permissionErrors.formatted() } ?? "0")개 항목을 읽지 못했습니다 — 전체 디스크 접근을 허용하면 정확해집니다"
+            )
+            .font(.system(size: 11.5))
+            .foregroundStyle(Theme.textDim)
+            Spacer()
+            Button("시스템 설정 열기") {
+                if let url = URL(
+                    string:
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+                {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.accent)
+            Button {
+                fdaBannerDismissed = true
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Theme.textFaint)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Theme.panel)
     }
 
     // MARK: - 툴바
