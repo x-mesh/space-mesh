@@ -1278,3 +1278,69 @@ pub fn list_apps() -> Vec<AppInfo> {
 pub fn app_data_size(bundle_id: String) -> u64 {
     space_rules::apps::app_data_size(&bundle_id)
 }
+// ───────────────────────── 회수 이력 (F1) ─────────────────────────
+
+#[derive(uniffi::Record)]
+pub struct ReclaimRecordInfo {
+    pub id: i64,
+    pub executed_at: String,
+    pub item_count: u64,
+    pub estimated: u64,
+    /// None = 측정 불가 — 0("아무것도 못 비웠다")과 구별해야 한다.
+    pub measured: Option<i64>,
+    pub undone: bool,
+}
+
+/// 회수 실행 기록 생성 — 실행 직전에 부르고, 검증이 끝나면 set_measured로 채운다.
+#[uniffi::export]
+pub fn reclaim_log_add(
+    db_path: String,
+    root_path: String,
+    item_count: u64,
+    estimated: u64,
+) -> Result<i64, ScanError> {
+    let conn = space_index::open(Path::new(&db_path))
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    space_index::reclaim_log_add(&conn, Path::new(&root_path), item_count, estimated)
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })
+}
+
+#[uniffi::export]
+pub fn reclaim_log_set_measured(db_path: String, id: i64, measured: i64) -> Result<(), ScanError> {
+    let conn = space_index::open(Path::new(&db_path))
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    space_index::reclaim_log_set_measured(&conn, id, measured)
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })
+}
+
+#[uniffi::export]
+pub fn reclaim_log_set_undone(db_path: String, id: i64) -> Result<(), ScanError> {
+    let conn = space_index::open(Path::new(&db_path))
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    space_index::reclaim_log_set_undone(&conn, id)
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })
+}
+
+/// 해당 루트의 회수 이력 (최신순).
+#[uniffi::export]
+pub fn reclaim_log_list(
+    db_path: String,
+    root_path: String,
+    limit: u32,
+) -> Result<Vec<ReclaimRecordInfo>, ScanError> {
+    let conn = space_index::open(Path::new(&db_path))
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    let records = space_index::reclaim_log_list(&conn, Path::new(&root_path), limit)
+        .map_err(|e| ScanError::Snapshot { msg: e.to_string() })?;
+    Ok(records
+        .into_iter()
+        .map(|r| ReclaimRecordInfo {
+            id: r.id,
+            executed_at: r.executed_at,
+            item_count: r.item_count,
+            estimated: r.estimated,
+            measured: r.measured,
+            undone: r.undone,
+        })
+        .collect())
+}

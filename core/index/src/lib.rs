@@ -87,6 +87,20 @@ pub fn open(db_path: &Path) -> rusqlite::Result<Connection> {
             PRIMARY KEY (scan_id, dev, ino)
         );",
     )?;
+    // 회수 실행 이력 (F1) — 스냅샷과 수명이 다르다(스냅샷은 프루닝되지만 이력은 남는다).
+    // scans를 참조하지 않고 root_path로만 묶는 이유다.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS reclaim_log (
+            id INTEGER PRIMARY KEY,
+            executed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+            root_path TEXT NOT NULL,
+            item_count INTEGER NOT NULL,
+            estimated INTEGER NOT NULL,
+            measured INTEGER,
+            undone INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_reclaim_log_root ON reclaim_log(root_path, id DESC);",
+    )?;
     Ok(conn)
 }
 
@@ -782,4 +796,80 @@ pub fn git_cache_put(
         ],
     )?;
     Ok(())
+}
+
+// ───────────────────────── 회수 이력 (F1) ─────────────────────────
+
+pub struct ReclaimRecord {
+    pub id: i64,
+    pub executed_at: String,
+    pub root_path: String,
+    pub item_count: u64,
+    pub estimated: u64,
+    /// 증분 재스캔으로 측정한 실제 회수량. None = 측정 불가 (풀스캔 강등 등).
+    pub measured: Option<i64>,
+    pub undone: bool,
+}
+
+/// 회수 실행 기록을 남기고 id를 반환한다. measured는 검증이 끝난 뒤 update로 채운다.
+pub fn reclaim_log_add(
+    conn: &Connection,
+    root_path: &Path,
+    item_count: u64,
+    estimated: u64,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO reclaim_log (root_path, item_count, estimated) VALUES (?1, ?2, ?3)",
+        params![
+            root_path.to_string_lossy().into_owned(),
+            item_count as i64,
+            estimated as i64
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 검증 재스캔이 끝난 뒤 측정 회수량을 기록한다 (양수 = 실제로 줄어든 양).
+pub fn reclaim_log_set_measured(conn: &Connection, id: i64, measured: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE reclaim_log SET measured = ?2 WHERE id = ?1",
+        params![id, measured],
+    )?;
+    Ok(())
+}
+
+/// undo 실행 표시.
+pub fn reclaim_log_set_undone(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE reclaim_log SET undone = 1 WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// 해당 루트의 회수 이력 (최신순, limit개).
+pub fn reclaim_log_list(
+    conn: &Connection,
+    root_path: &Path,
+    limit: u32,
+) -> rusqlite::Result<Vec<ReclaimRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, executed_at, root_path, item_count, estimated, measured, undone
+         FROM reclaim_log WHERE root_path = ?1 ORDER BY id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        params![root_path.to_string_lossy().into_owned(), limit as i64],
+        |r| {
+            Ok(ReclaimRecord {
+                id: r.get(0)?,
+                executed_at: r.get(1)?,
+                root_path: r.get(2)?,
+                item_count: r.get::<_, i64>(3)? as u64,
+                estimated: r.get::<_, i64>(4)? as u64,
+                measured: r.get(5)?,
+                undone: r.get::<_, i64>(6)? != 0,
+            })
+        },
+    )?;
+    rows.collect()
 }
