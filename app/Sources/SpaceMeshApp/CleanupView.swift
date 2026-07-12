@@ -5,6 +5,7 @@ import SwiftUI
 /// 룰 기반 불필요 파일 탐지 + Cleanup Cart.
 struct CleanupView: View {
     @ObservedObject var model: CleanupModel
+    @ObservedObject var plan: ReclaimPlan
     @State private var confirmTrash = false
 
     private var selected: [CleanupCandidate] {
@@ -52,7 +53,11 @@ struct CleanupView: View {
                 undoAvailable: !model.lastBatch.isEmpty,
                 onTrash: { confirmTrash = true },
                 onUndo: { model.undoLastBatch() },
-                onRefresh: { model.detect() }
+                onRefresh: { model.detect() },
+                onAddToPlan: {
+                    plan.add(selected.map(PlanItem.init))
+                    model.selectedCleanupPaths = []
+                }
             )
         }
         .onAppear {
@@ -248,6 +253,8 @@ struct CartBar: View {
     let onTrash: () -> Void
     let onUndo: () -> Void
     let onRefresh: () -> Void
+    /// 통합 회수 플랜(F1)에 담기. 회수 대상이 아닌 표시 전용 뷰는 nil로 두면 버튼이 빠진다.
+    var onAddToPlan: (() -> Void)?
 
     var body: some View {
         HStack(spacing: 14) {
@@ -283,6 +290,22 @@ struct CartBar: View {
             }
             .buttonStyle(.plain)
             .help("다시 검사")
+            if let onAddToPlan, selectedCount > 0 {
+                Button {
+                    onAddToPlan()
+                } label: {
+                    Text("플랜에 추가")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6).stroke(Theme.accent, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("다른 탭의 후보와 함께 한 번에 실행 — 실행 후 실측 회수량을 보여줍니다")
+            }
             if undoAvailable {
                 Button {
                     onUndo()

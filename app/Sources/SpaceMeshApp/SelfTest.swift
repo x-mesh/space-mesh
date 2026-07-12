@@ -3,6 +3,9 @@ import SpaceMeshCore
 
 /// `swift run SpaceMeshApp --selftest` — GUI 없이 FFI 경로를 end-to-end 검증한다.
 enum SelfTest {
+    /// App.init(MainActor)에서 호출 — ReclaimPlan 등 MainActor 모델을 그대로 검증하려고
+    /// 격리를 유지한다.
+    @MainActor
     static func runIfRequested() {
         guard CommandLine.arguments.contains("--selftest") else { return }
         do {
@@ -45,8 +48,9 @@ enum SelfTest {
             failures.append(contentsOf: testPersistentIncremental())
             failures.append(contentsOf: testCliPath())
             failures.append(contentsOf: testGitRepos())
+            failures.append(contentsOf: testPlanMerge())
             if failures.isEmpty {
-                print("SELFTEST OK — files=\(stats.totalFiles) dirs=\(stats.totalDirs) root=\(root.allocatedSize)B + cleanup/dedup/trash-undo")
+                print("SELFTEST OK — files=\(stats.totalFiles) dirs=\(stats.totalDirs) root=\(root.allocatedSize)B + cleanup/dedup/trash-undo/plan")
                 exit(0)
             } else {
                 print("SELFTEST FAIL:\n  " + failures.joined(separator: "\n  "))
@@ -307,4 +311,38 @@ enum SelfTest {
         }
         return failures
     }
+
+    /// 회수 플랜 병합 규칙 (F1) — 조상/자손이 함께 담겨 같은 바이트를 두 번 세면 안 된다.
+    @MainActor
+    private static func testPlanMerge() -> [String] {
+        let plan = ReclaimPlan()
+        let child = PlanItem(
+            path: "/Users/x/proj/node_modules/sub",
+            deletePaths: ["/Users/x/proj/node_modules/sub"], estimatedBytes: 100,
+            source: .category, safety: "safe", recreateCommand: "")
+        let parent = PlanItem(
+            path: "/Users/x/proj/node_modules", deletePaths: ["/Users/x/proj/node_modules"],
+            estimatedBytes: 500, source: .category, safety: "safe", recreateCommand: "")
+        var failures: [String] = []
+
+        // 자손 → 조상: 조상이 자손을 밀어낸다.
+        plan.add(child)
+        plan.add(parent)
+        if plan.items.map(\.path) != [parent.path] {
+            failures.append("plan: 조상 추가 시 자손 미제거 (\(plan.items.map(\.path)))")
+        }
+        // 조상이 있으면 자손은 무시.
+        plan.add(child)
+        if plan.items.count != 1 {
+            failures.append("plan: 조상 존재 시 자손이 추가됨")
+        }
+        // 중복 추가 무시 + 합계.
+        plan.add(parent)
+        if plan.items.count != 1 || plan.totalEstimated != 500 {
+            failures.append(
+                "plan: 중복/합계 오류 (count=\(plan.items.count), total=\(plan.totalEstimated))")
+        }
+        return failures
+    }
+
 }

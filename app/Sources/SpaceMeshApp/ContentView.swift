@@ -51,6 +51,7 @@ private let sidebarGroups: [(title: String, items: [SidebarItem])] = [
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @StateObject private var cleanup = CleanupModel()
+    @StateObject private var plan = ReclaimPlan()
     @StateObject private var volume = VolumeStatus()
     @State private var scanTarget = NSHomeDirectory()
     @State private var previewURL: URL?
@@ -81,6 +82,12 @@ struct ContentView: View {
                         .clipped()
                         .layoutPriority(0)
                 }
+                // 통합 회수 플랜 트레이 (F1) — 어느 탭에서 담았든 여기 하나로 모인다.
+                // 담긴 게 없고 보고할 결과도 없으면 자리를 차지하지 않는다.
+                if !plan.items.isEmpty || plan.report != nil || !plan.lastBatch.isEmpty {
+                    Rectangle().fill(Theme.border).frame(height: 1)
+                    ReclaimTrayView(plan: plan)
+                }
             }
         }
         .background(Theme.bg)
@@ -107,17 +114,17 @@ struct ContentView: View {
             case .changes:
                 ChangesView(scanTarget: scanTarget)
             case .categories:
-                CategoriesView(model: cleanup, scanTarget: scanTarget)
+                CategoriesView(model: cleanup, plan: plan, scanTarget: scanTarget)
             case .apps:
                 AppsView(model: cleanup)
             case .git:
                 GitView(scanTarget: scanTarget)
             case .cleanup:
-                CleanupView(model: cleanup)
+                CleanupView(model: cleanup, plan: plan)
             case .duplicates:
-                DuplicatesView(model: cleanup, defaultRoot: scanTarget)
+                DuplicatesView(model: cleanup, plan: plan, defaultRoot: scanTarget)
             case .stale:
-                StaleView(cleanup: cleanup)
+                StaleView(cleanup: cleanup, plan: plan)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -590,6 +597,9 @@ struct ContentView: View {
                             previewURL = URL(fileURLWithPath: file.path)
                         }
                         .contextMenu {
+                            Button("회수 플랜에 추가") {
+                                plan.add(PlanItem(file))
+                            }
                             Button("Finder에서 보기") {
                                 NSWorkspace.shared.activateFileViewerSelecting(
                                     [URL(fileURLWithPath: file.path)])

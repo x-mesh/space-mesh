@@ -6,6 +6,7 @@ import SwiftUI
 /// 중복 파일 탐지 뷰 — 크기→부분해시→전체해시 3단 필터 결과.
 struct DuplicatesView: View {
     @ObservedObject var model: CleanupModel
+    @ObservedObject var plan: ReclaimPlan
     @EnvironmentObject private var app: AppModel
     let defaultRoot: String
 
@@ -54,7 +55,14 @@ struct DuplicatesView: View {
                 undoAvailable: !model.lastBatch.isEmpty,
                 onTrash: { confirmTrash = true },
                 onUndo: { model.undoLastBatch() },
-                onRefresh: { model.findDups(root: root, minMib: minMib, handle: app.handle, scannedRoot: app.scannedRoot) }
+                onRefresh: { model.findDups(root: root, minMib: minMib, handle: app.handle, scannedRoot: app.scannedRoot) },
+                onAddToPlan: {
+                    plan.add(
+                        selectedItems.map {
+                            PlanItem(duplicatePath: $0.path, estimated: $0.size)
+                        })
+                    model.selectedDupPaths = []
+                }
             )
         }
         .onAppear {

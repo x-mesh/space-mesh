@@ -8,6 +8,12 @@ struct TrashRecord {
     let size: UInt64
 }
 
+/// path가 ancestor와 같거나 그 아래인가 — 조상/자손이 함께 선택돼 같은 바이트를
+/// 두 번 세는 것을 막는 규칙. 정리 탭 선택과 회수 플랜(F1)이 같은 규칙을 쓴다.
+func isSameOrDescendant(_ path: String, of ancestor: String) -> Bool {
+    path == ancestor || path.hasPrefix(ancestor + "/")
+}
+
 @MainActor
 final class CleanupModel: ObservableObject {
     // 룰 기반 정리 후보
@@ -96,7 +102,7 @@ final class CleanupModel: ObservableObject {
     func toggleCleanupSelection(_ path: String, on: Bool) {
         if on {
             selectedCleanupPaths = selectedCleanupPaths.filter {
-                !$0.hasPrefix(path + "/") && !path.hasPrefix($0 + "/")
+                !isSameOrDescendant($0, of: path) && !isSameOrDescendant(path, of: $0)
             }
             selectedCleanupPaths.insert(path)
         } else {
@@ -120,26 +126,7 @@ final class CleanupModel: ObservableObject {
     /// 선택 경로를 휴지통으로 이동. 반환: (성공 수, 건너뜀 수).
     @discardableResult
     func trash(paths: [(path: String, size: UInt64)]) -> (moved: Int, skipped: Int) {
-        var batch: [TrashRecord] = []
-        var skipped = 0
-        let fm = FileManager.default
-        for item in paths {
-            guard Self.isSafeToTrash(item.path) else {
-                skipped += 1
-                continue
-            }
-            var resultURL: NSURL?
-            do {
-                try fm.trashItem(
-                    at: URL(fileURLWithPath: item.path), resultingItemURL: &resultURL)
-                if let trashURL = resultURL as URL? {
-                    batch.append(
-                        TrashRecord(original: item.path, trashURL: trashURL, size: item.size))
-                }
-            } catch {
-                skipped += 1
-            }
-        }
+        let (batch, skipped) = moveToTrash(paths: paths)
         lastBatch = batch
         let freed = batch.reduce(UInt64(0)) { $0 + $1.size }
         if batch.isEmpty {
@@ -153,18 +140,51 @@ final class CleanupModel: ObservableObject {
 
     /// 마지막 배치를 휴지통에서 원위치로 복원.
     func undoLastBatch() {
-        let fm = FileManager.default
-        var restored = 0
-        for record in lastBatch.reversed() {
-            do {
-                try fm.moveItem(
-                    at: record.trashURL, to: URL(fileURLWithPath: record.original))
-                restored += 1
-            } catch {
-                // 이미 휴지통이 비워졌거나 원위치에 새 항목이 생긴 경우.
-            }
-        }
+        let restored = restoreFromTrash(lastBatch)
         message = "복원: \(restored)/\(lastBatch.count)개"
         lastBatch = []
     }
+}
+
+// MARK: - 휴지통 실행 엔진 (CleanupModel · ReclaimPlan 공용)
+
+/// 안전 가드를 통과한 경로만 휴지통으로 옮긴다. 반환: (이동 기록, 건너뛴 수).
+/// 상태를 만지지 않으므로 회수 플랜(F1)도 같은 엔진을 그대로 쓴다.
+func moveToTrash(paths: [(path: String, size: UInt64)]) -> (batch: [TrashRecord], skipped: Int) {
+    var batch: [TrashRecord] = []
+    var skipped = 0
+    let fm = FileManager.default
+    for item in paths {
+        guard CleanupModel.isSafeToTrash(item.path) else {
+            skipped += 1
+            continue
+        }
+        var resultURL: NSURL?
+        do {
+            try fm.trashItem(at: URL(fileURLWithPath: item.path), resultingItemURL: &resultURL)
+            if let trashURL = resultURL as URL? {
+                batch.append(
+                    TrashRecord(original: item.path, trashURL: trashURL, size: item.size))
+            }
+        } catch {
+            skipped += 1
+        }
+    }
+    return (batch, skipped)
+}
+
+/// 배치를 원위치로 되돌린다. 반환: 복원 성공 수.
+@discardableResult
+func restoreFromTrash(_ batch: [TrashRecord]) -> Int {
+    let fm = FileManager.default
+    var restored = 0
+    for record in batch.reversed() {
+        do {
+            try fm.moveItem(at: record.trashURL, to: URL(fileURLWithPath: record.original))
+            restored += 1
+        } catch {
+            // 이미 휴지통이 비워졌거나 원위치에 새 항목이 생긴 경우.
+        }
+    }
+    return restored
 }

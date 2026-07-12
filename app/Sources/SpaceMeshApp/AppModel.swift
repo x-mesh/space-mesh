@@ -109,6 +109,32 @@ final class AppModel: ObservableObject {
         self.reload()
     }
 
+    /// 증분 재스캔이 돌려준 새 핸들을 받아들인다. apply()와 달리 사용자가 보던
+    /// 위치를 루트로 되돌리지 않는다 — 회수 실행 직후 화면이 튀면 안 된다.
+    ///
+    /// 트리가 바뀌었으므로 저장된 indexPath는 다른 형제를 가리킬 수 있다.
+    /// breadcrumb의 "이름"으로 다시 해석하고, 사라진 구간은 존재하는 가장 깊은
+    /// 조상까지 잘라낸다.
+    func adopt(handle: ScanHandle) {
+        self.handle = handle
+        self.stats = handle.stats()
+        self.rootAllocated = (try? handle.nodeAt(indexPath: []).allocatedSize) ?? 0
+        self.staleFiles = handle.staleFiles(limit: 20, minAgeDays: Self.staleAgeDays)
+
+        var newIndexPath: [UInt32] = []
+        var newCrumbs: [String] = []
+        for name in breadcrumb {
+            guard let kids = try? handle.children(indexPath: newIndexPath),
+                let match = kids.first(where: { $0.name == name })
+            else { break }
+            newIndexPath.append(match.index)
+            newCrumbs.append(name)
+        }
+        self.indexPath = newIndexPath
+        self.breadcrumb = newCrumbs
+        self.reload()
+    }
+
     /// 방치 파일로 간주하는 최소 경과일.
     nonisolated static let staleAgeDays: UInt32 = 180
 

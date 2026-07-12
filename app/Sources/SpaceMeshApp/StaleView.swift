@@ -9,6 +9,7 @@ import SwiftUI
 struct StaleView: View {
     @EnvironmentObject var app: AppModel
     @ObservedObject var cleanup: CleanupModel
+    @ObservedObject var plan: ReclaimPlan
 
     @State private var selected: Set<String> = []
     @State private var confirmTrash = false
@@ -62,7 +63,11 @@ struct StaleView: View {
                 undoAvailable: !cleanup.lastBatch.isEmpty,
                 onTrash: { confirmTrash = true },
                 onUndo: { cleanup.undoLastBatch() },
-                onRefresh: { app.refreshStale() }
+                onRefresh: { app.refreshStale() },
+                onAddToPlan: {
+                    plan.add(app.staleFiles.filter { selected.contains($0.path) }.map(PlanItem.init))
+                    selected = []
+                }
             )
         }
         .quickLookPreview($previewURL)
