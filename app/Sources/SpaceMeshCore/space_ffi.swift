@@ -759,6 +759,13 @@ public protocol ScanHandleProtocol: AnyObject, Sendable {
     func stats()  -> ScanStatsInfo
     
     /**
+     * 정책 기반 회수 제안 — CLI --suggest와 동일한 단일 정책
+     * (space_rules::suggest). 블로킹(룰 경로 측정 + git 조회) —
+     * 백그라운드에서 호출. 홈은 $HOME 기준.
+     */
+    func suggestions(idleDays: UInt64, minBytes: UInt64)  -> SuggestionInfo
+    
+    /**
      * 트리 전체에서 가장 큰 파일 top-N.
      */
     func topFiles(limit: UInt32)  -> [BigFile]
@@ -961,6 +968,20 @@ open func staleFiles(limit: UInt32, minAgeDays: UInt32) -> [BigFile]  {
 open func stats() -> ScanStatsInfo  {
     return try!  FfiConverterTypeScanStatsInfo_lift(try! rustCall() {
     uniffi_space_ffi_fn_method_scanhandle_stats(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * 정책 기반 회수 제안 — CLI --suggest와 동일한 단일 정책
+     * (space_rules::suggest). 블로킹(룰 경로 측정 + git 조회) —
+     * 백그라운드에서 호출. 홈은 $HOME 기준.
+     */
+open func suggestions(idleDays: UInt64, minBytes: UInt64) -> SuggestionInfo  {
+    return try!  FfiConverterTypeSuggestionInfo_lift(try! rustCall() {
+    uniffi_space_ffi_fn_method_scanhandle_suggestions(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(idleDays),
+        FfiConverterUInt64.lower(minBytes),$0
     )
 })
 }
@@ -1829,16 +1850,32 @@ public func FfiConverterTypeDiffEntryInfo_lower(_ value: DiffEntryInfo) -> RustB
 
 public struct DupGroupInfo {
     public var fileSize: UInt64
+    /**
+     * 하나만 남기고 지웠을 때 **실제로** 늘어나는 공간. 이미 블록을 공유하는
+     * 사본은 세지 않는다 (clone_shared 참조).
+     */
     public var reclaimable: UInt64
     public var hashHex: String
+    /**
+     * 이미 APFS 블록을 공유하는 쌍이 있다 (F3) — 지워도 그만큼은 안 늘어난다.
+     */
+    public var cloneShared: Bool
     public var files: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(fileSize: UInt64, reclaimable: UInt64, hashHex: String, files: [String]) {
+    public init(fileSize: UInt64, 
+        /**
+         * 하나만 남기고 지웠을 때 **실제로** 늘어나는 공간. 이미 블록을 공유하는
+         * 사본은 세지 않는다 (clone_shared 참조).
+         */reclaimable: UInt64, hashHex: String, 
+        /**
+         * 이미 APFS 블록을 공유하는 쌍이 있다 (F3) — 지워도 그만큼은 안 늘어난다.
+         */cloneShared: Bool, files: [String]) {
         self.fileSize = fileSize
         self.reclaimable = reclaimable
         self.hashHex = hashHex
+        self.cloneShared = cloneShared
         self.files = files
     }
 }
@@ -1859,6 +1896,9 @@ extension DupGroupInfo: Equatable, Hashable {
         if lhs.hashHex != rhs.hashHex {
             return false
         }
+        if lhs.cloneShared != rhs.cloneShared {
+            return false
+        }
         if lhs.files != rhs.files {
             return false
         }
@@ -1869,6 +1909,7 @@ extension DupGroupInfo: Equatable, Hashable {
         hasher.combine(fileSize)
         hasher.combine(reclaimable)
         hasher.combine(hashHex)
+        hasher.combine(cloneShared)
         hasher.combine(files)
     }
 }
@@ -1885,6 +1926,7 @@ public struct FfiConverterTypeDupGroupInfo: FfiConverterRustBuffer {
                 fileSize: FfiConverterUInt64.read(from: &buf), 
                 reclaimable: FfiConverterUInt64.read(from: &buf), 
                 hashHex: FfiConverterString.read(from: &buf), 
+                cloneShared: FfiConverterBool.read(from: &buf), 
                 files: FfiConverterSequenceString.read(from: &buf)
         )
     }
@@ -1893,6 +1935,7 @@ public struct FfiConverterTypeDupGroupInfo: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.fileSize, into: &buf)
         FfiConverterUInt64.write(value.reclaimable, into: &buf)
         FfiConverterString.write(value.hashHex, into: &buf)
+        FfiConverterBool.write(value.cloneShared, into: &buf)
         FfiConverterSequenceString.write(value.files, into: &buf)
     }
 }
@@ -2236,6 +2279,84 @@ public func FfiConverterTypeGitReport_lower(_ value: GitReport) -> RustBuffer {
 }
 
 
+public struct MergeStatsInfo {
+    public var merged: UInt32
+    public var failed: UInt32
+    public var reclaimed: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(merged: UInt32, failed: UInt32, reclaimed: UInt64) {
+        self.merged = merged
+        self.failed = failed
+        self.reclaimed = reclaimed
+    }
+}
+
+#if compiler(>=6)
+extension MergeStatsInfo: Sendable {}
+#endif
+
+
+extension MergeStatsInfo: Equatable, Hashable {
+    public static func ==(lhs: MergeStatsInfo, rhs: MergeStatsInfo) -> Bool {
+        if lhs.merged != rhs.merged {
+            return false
+        }
+        if lhs.failed != rhs.failed {
+            return false
+        }
+        if lhs.reclaimed != rhs.reclaimed {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(merged)
+        hasher.combine(failed)
+        hasher.combine(reclaimed)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMergeStatsInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MergeStatsInfo {
+        return
+            try MergeStatsInfo(
+                merged: FfiConverterUInt32.read(from: &buf), 
+                failed: FfiConverterUInt32.read(from: &buf), 
+                reclaimed: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MergeStatsInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.merged, into: &buf)
+        FfiConverterUInt32.write(value.failed, into: &buf)
+        FfiConverterUInt64.write(value.reclaimed, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMergeStatsInfo_lift(_ buf: RustBuffer) throws -> MergeStatsInfo {
+    return try FfiConverterTypeMergeStatsInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMergeStatsInfo_lower(_ value: MergeStatsInfo) -> RustBuffer {
+    return FfiConverterTypeMergeStatsInfo.lower(value)
+}
+
+
 /**
  * 한 노드의 표시용 정보. children은 포함하지 않는다 (레벨 단위 조회).
  */
@@ -2352,6 +2473,114 @@ public func FfiConverterTypeNodeInfo_lift(_ buf: RustBuffer) throws -> NodeInfo 
 #endif
 public func FfiConverterTypeNodeInfo_lower(_ value: NodeInfo) -> RustBuffer {
     return FfiConverterTypeNodeInfo.lower(value)
+}
+
+
+public struct ReclaimRecordInfo {
+    public var id: Int64
+    public var executedAt: String
+    public var itemCount: UInt64
+    public var estimated: UInt64
+    /**
+     * None = 측정 불가 — 0("아무것도 못 비웠다")과 구별해야 한다.
+     */
+    public var measured: Int64?
+    public var undone: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: Int64, executedAt: String, itemCount: UInt64, estimated: UInt64, 
+        /**
+         * None = 측정 불가 — 0("아무것도 못 비웠다")과 구별해야 한다.
+         */measured: Int64?, undone: Bool) {
+        self.id = id
+        self.executedAt = executedAt
+        self.itemCount = itemCount
+        self.estimated = estimated
+        self.measured = measured
+        self.undone = undone
+    }
+}
+
+#if compiler(>=6)
+extension ReclaimRecordInfo: Sendable {}
+#endif
+
+
+extension ReclaimRecordInfo: Equatable, Hashable {
+    public static func ==(lhs: ReclaimRecordInfo, rhs: ReclaimRecordInfo) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.executedAt != rhs.executedAt {
+            return false
+        }
+        if lhs.itemCount != rhs.itemCount {
+            return false
+        }
+        if lhs.estimated != rhs.estimated {
+            return false
+        }
+        if lhs.measured != rhs.measured {
+            return false
+        }
+        if lhs.undone != rhs.undone {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(executedAt)
+        hasher.combine(itemCount)
+        hasher.combine(estimated)
+        hasher.combine(measured)
+        hasher.combine(undone)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeReclaimRecordInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ReclaimRecordInfo {
+        return
+            try ReclaimRecordInfo(
+                id: FfiConverterInt64.read(from: &buf), 
+                executedAt: FfiConverterString.read(from: &buf), 
+                itemCount: FfiConverterUInt64.read(from: &buf), 
+                estimated: FfiConverterUInt64.read(from: &buf), 
+                measured: FfiConverterOptionInt64.read(from: &buf), 
+                undone: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ReclaimRecordInfo, into buf: inout [UInt8]) {
+        FfiConverterInt64.write(value.id, into: &buf)
+        FfiConverterString.write(value.executedAt, into: &buf)
+        FfiConverterUInt64.write(value.itemCount, into: &buf)
+        FfiConverterUInt64.write(value.estimated, into: &buf)
+        FfiConverterOptionInt64.write(value.measured, into: &buf)
+        FfiConverterBool.write(value.undone, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReclaimRecordInfo_lift(_ buf: RustBuffer) throws -> ReclaimRecordInfo {
+    return try FfiConverterTypeReclaimRecordInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeReclaimRecordInfo_lower(_ value: ReclaimRecordInfo) -> RustBuffer {
+    return FfiConverterTypeReclaimRecordInfo.lower(value)
 }
 
 
@@ -2527,13 +2756,21 @@ public struct ScanStatsInfo {
     public var totalFiles: UInt64
     public var totalDirs: UInt64
     public var errors: UInt64
+    /**
+     * errors 중 권한 거부 몫 — 앱이 전체 디스크 접근 안내를 띄울지 판단한다.
+     */
+    public var permissionErrors: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(totalFiles: UInt64, totalDirs: UInt64, errors: UInt64) {
+    public init(totalFiles: UInt64, totalDirs: UInt64, errors: UInt64, 
+        /**
+         * errors 중 권한 거부 몫 — 앱이 전체 디스크 접근 안내를 띄울지 판단한다.
+         */permissionErrors: UInt64) {
         self.totalFiles = totalFiles
         self.totalDirs = totalDirs
         self.errors = errors
+        self.permissionErrors = permissionErrors
     }
 }
 
@@ -2553,6 +2790,9 @@ extension ScanStatsInfo: Equatable, Hashable {
         if lhs.errors != rhs.errors {
             return false
         }
+        if lhs.permissionErrors != rhs.permissionErrors {
+            return false
+        }
         return true
     }
 
@@ -2560,6 +2800,7 @@ extension ScanStatsInfo: Equatable, Hashable {
         hasher.combine(totalFiles)
         hasher.combine(totalDirs)
         hasher.combine(errors)
+        hasher.combine(permissionErrors)
     }
 }
 
@@ -2574,7 +2815,8 @@ public struct FfiConverterTypeScanStatsInfo: FfiConverterRustBuffer {
             try ScanStatsInfo(
                 totalFiles: FfiConverterUInt64.read(from: &buf), 
                 totalDirs: FfiConverterUInt64.read(from: &buf), 
-                errors: FfiConverterUInt64.read(from: &buf)
+                errors: FfiConverterUInt64.read(from: &buf), 
+                permissionErrors: FfiConverterUInt64.read(from: &buf)
         )
     }
 
@@ -2582,6 +2824,7 @@ public struct FfiConverterTypeScanStatsInfo: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.totalFiles, into: &buf)
         FfiConverterUInt64.write(value.totalDirs, into: &buf)
         FfiConverterUInt64.write(value.errors, into: &buf)
+        FfiConverterUInt64.write(value.permissionErrors, into: &buf)
     }
 }
 
@@ -2747,6 +2990,228 @@ public func FfiConverterTypeSnapshotState_lift(_ buf: RustBuffer) throws -> Snap
 #endif
 public func FfiConverterTypeSnapshotState_lower(_ value: SnapshotState) -> RustBuffer {
     return FfiConverterTypeSnapshotState.lower(value)
+}
+
+
+public struct SuggestionInfo {
+    public var generatedAt: UInt64
+    public var totalEstimated: UInt64
+    public var belowThreshold: Bool
+    public var items: [SuggestionItemInfo]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(generatedAt: UInt64, totalEstimated: UInt64, belowThreshold: Bool, items: [SuggestionItemInfo]) {
+        self.generatedAt = generatedAt
+        self.totalEstimated = totalEstimated
+        self.belowThreshold = belowThreshold
+        self.items = items
+    }
+}
+
+#if compiler(>=6)
+extension SuggestionInfo: Sendable {}
+#endif
+
+
+extension SuggestionInfo: Equatable, Hashable {
+    public static func ==(lhs: SuggestionInfo, rhs: SuggestionInfo) -> Bool {
+        if lhs.generatedAt != rhs.generatedAt {
+            return false
+        }
+        if lhs.totalEstimated != rhs.totalEstimated {
+            return false
+        }
+        if lhs.belowThreshold != rhs.belowThreshold {
+            return false
+        }
+        if lhs.items != rhs.items {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(generatedAt)
+        hasher.combine(totalEstimated)
+        hasher.combine(belowThreshold)
+        hasher.combine(items)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSuggestionInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SuggestionInfo {
+        return
+            try SuggestionInfo(
+                generatedAt: FfiConverterUInt64.read(from: &buf), 
+                totalEstimated: FfiConverterUInt64.read(from: &buf), 
+                belowThreshold: FfiConverterBool.read(from: &buf), 
+                items: FfiConverterSequenceTypeSuggestionItemInfo.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SuggestionInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.generatedAt, into: &buf)
+        FfiConverterUInt64.write(value.totalEstimated, into: &buf)
+        FfiConverterBool.write(value.belowThreshold, into: &buf)
+        FfiConverterSequenceTypeSuggestionItemInfo.write(value.items, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSuggestionInfo_lift(_ buf: RustBuffer) throws -> SuggestionInfo {
+    return try FfiConverterTypeSuggestionInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSuggestionInfo_lower(_ value: SuggestionInfo) -> RustBuffer {
+    return FfiConverterTypeSuggestionInfo.lower(value)
+}
+
+
+public struct SuggestionItemInfo {
+    /**
+     * 화면에 보여줄 대표 위치.
+     */
+    public var path: String
+    /**
+     * 실제 삭제 대상 — path와 다를 수 있다. **실행은 반드시 이걸 써야 한다.**
+     */
+    public var deletePaths: [String]
+    public var title: String
+    /**
+     * "rule" | "category"
+     */
+    public var source: String
+    public var safety: String
+    public var estimated: UInt64
+    public var recreateCommand: String
+    public var idleDays: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * 화면에 보여줄 대표 위치.
+         */path: String, 
+        /**
+         * 실제 삭제 대상 — path와 다를 수 있다. **실행은 반드시 이걸 써야 한다.**
+         */deletePaths: [String], title: String, 
+        /**
+         * "rule" | "category"
+         */source: String, safety: String, estimated: UInt64, recreateCommand: String, idleDays: UInt64?) {
+        self.path = path
+        self.deletePaths = deletePaths
+        self.title = title
+        self.source = source
+        self.safety = safety
+        self.estimated = estimated
+        self.recreateCommand = recreateCommand
+        self.idleDays = idleDays
+    }
+}
+
+#if compiler(>=6)
+extension SuggestionItemInfo: Sendable {}
+#endif
+
+
+extension SuggestionItemInfo: Equatable, Hashable {
+    public static func ==(lhs: SuggestionItemInfo, rhs: SuggestionItemInfo) -> Bool {
+        if lhs.path != rhs.path {
+            return false
+        }
+        if lhs.deletePaths != rhs.deletePaths {
+            return false
+        }
+        if lhs.title != rhs.title {
+            return false
+        }
+        if lhs.source != rhs.source {
+            return false
+        }
+        if lhs.safety != rhs.safety {
+            return false
+        }
+        if lhs.estimated != rhs.estimated {
+            return false
+        }
+        if lhs.recreateCommand != rhs.recreateCommand {
+            return false
+        }
+        if lhs.idleDays != rhs.idleDays {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(path)
+        hasher.combine(deletePaths)
+        hasher.combine(title)
+        hasher.combine(source)
+        hasher.combine(safety)
+        hasher.combine(estimated)
+        hasher.combine(recreateCommand)
+        hasher.combine(idleDays)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSuggestionItemInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SuggestionItemInfo {
+        return
+            try SuggestionItemInfo(
+                path: FfiConverterString.read(from: &buf), 
+                deletePaths: FfiConverterSequenceString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                source: FfiConverterString.read(from: &buf), 
+                safety: FfiConverterString.read(from: &buf), 
+                estimated: FfiConverterUInt64.read(from: &buf), 
+                recreateCommand: FfiConverterString.read(from: &buf), 
+                idleDays: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SuggestionItemInfo, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterSequenceString.write(value.deletePaths, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.source, into: &buf)
+        FfiConverterString.write(value.safety, into: &buf)
+        FfiConverterUInt64.write(value.estimated, into: &buf)
+        FfiConverterString.write(value.recreateCommand, into: &buf)
+        FfiConverterOptionUInt64.write(value.idleDays, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSuggestionItemInfo_lift(_ buf: RustBuffer) throws -> SuggestionItemInfo {
+    return try FfiConverterTypeSuggestionItemInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSuggestionItemInfo_lower(_ value: SuggestionItemInfo) -> RustBuffer {
+    return FfiConverterTypeSuggestionItemInfo.lower(value)
 }
 
 
@@ -2962,6 +3427,30 @@ fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
+    typealias SwiftType = Int64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt64.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -3295,6 +3784,31 @@ fileprivate struct FfiConverterSequenceTypeNodeInfo: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeReclaimRecordInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [ReclaimRecordInfo]
+
+    public static func write(_ value: [ReclaimRecordInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeReclaimRecordInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ReclaimRecordInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ReclaimRecordInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeReclaimRecordInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeSnapshotInfo: FfiConverterRustBuffer {
     typealias SwiftType = [SnapshotInfo]
 
@@ -3312,6 +3826,31 @@ fileprivate struct FfiConverterSequenceTypeSnapshotInfo: FfiConverterRustBuffer 
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeSnapshotInfo.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeSuggestionItemInfo: FfiConverterRustBuffer {
+    typealias SwiftType = [SuggestionItemInfo]
+
+    public static func write(_ value: [SuggestionItemInfo], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeSuggestionItemInfo.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [SuggestionItemInfo] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [SuggestionItemInfo]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeSuggestionItemInfo.read(from: &buf))
         }
         return seq
     }
@@ -3445,6 +3984,20 @@ public func loadSnapshotState(dbPath: String, rootPath: String)throws  -> Snapsh
     )
 })
 }
+/**
+ * victims를 keep의 APFS 클론 사본으로 교체한다 — **파일은 그대로 남는다.**
+ * 삭제가 아니라 블록 공유라, 중복이지만 지우기 아까운 사본에 쓴다.
+ * 내용이 다르면 거부하고, 하드링크가 걸린 victim도 거부한다 (core에서 재검증).
+ * 블로킹(전체 해시 재확인) — 백그라운드에서 호출.
+ */
+public func mergeDuplicates(keep: String, victims: [String]) -> MergeStatsInfo  {
+    return try!  FfiConverterTypeMergeStatsInfo_lift(try! rustCall() {
+    uniffi_space_ffi_fn_func_merge_duplicates(
+        FfiConverterString.lower(keep),
+        FfiConverterSequenceString.lower(victims),$0
+    )
+})
+}
 public func openDiff(dbPath: String, oldId: Int64, newId: Int64)throws  -> DiffHandle  {
     return try  FfiConverterTypeDiffHandle_lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
     uniffi_space_ffi_fn_func_open_diff(
@@ -3453,6 +4006,46 @@ public func openDiff(dbPath: String, oldId: Int64, newId: Int64)throws  -> DiffH
         FfiConverterInt64.lower(newId),$0
     )
 })
+}
+/**
+ * 회수 실행 기록 생성 — 실행 직전에 부르고, 검증이 끝나면 set_measured로 채운다.
+ */
+public func reclaimLogAdd(dbPath: String, rootPath: String, itemCount: UInt64, estimated: UInt64)throws  -> Int64  {
+    return try  FfiConverterInt64.lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_func_reclaim_log_add(
+        FfiConverterString.lower(dbPath),
+        FfiConverterString.lower(rootPath),
+        FfiConverterUInt64.lower(itemCount),
+        FfiConverterUInt64.lower(estimated),$0
+    )
+})
+}
+/**
+ * 해당 루트의 회수 이력 (최신순).
+ */
+public func reclaimLogList(dbPath: String, rootPath: String, limit: UInt32)throws  -> [ReclaimRecordInfo]  {
+    return try  FfiConverterSequenceTypeReclaimRecordInfo.lift(try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_func_reclaim_log_list(
+        FfiConverterString.lower(dbPath),
+        FfiConverterString.lower(rootPath),
+        FfiConverterUInt32.lower(limit),$0
+    )
+})
+}
+public func reclaimLogSetMeasured(dbPath: String, id: Int64, measured: Int64)throws   {try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_func_reclaim_log_set_measured(
+        FfiConverterString.lower(dbPath),
+        FfiConverterInt64.lower(id),
+        FfiConverterInt64.lower(measured),$0
+    )
+}
+}
+public func reclaimLogSetUndone(dbPath: String, id: Int64)throws   {try rustCallWithError(FfiConverterTypeScanError_lift) {
+    uniffi_space_ffi_fn_func_reclaim_log_set_undone(
+        FfiConverterString.lower(dbPath),
+        FfiConverterInt64.lower(id),$0
+    )
+}
 }
 /**
  * 스캔 후 스냅샷 저장까지 한 번에.
@@ -3551,7 +4144,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_space_ffi_checksum_func_load_snapshot_state() != 52298) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_space_ffi_checksum_func_merge_duplicates() != 18631) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_space_ffi_checksum_func_open_diff() != 51550) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_func_reclaim_log_add() != 47299) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_func_reclaim_log_list() != 42215) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_func_reclaim_log_set_measured() != 4152) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_func_reclaim_log_set_undone() != 2551) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_func_scan_and_save() != 45019) {
@@ -3612,6 +4220,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_stats() != 61743) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_space_ffi_checksum_method_scanhandle_suggestions() != 24050) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_top_files() != 2419) {

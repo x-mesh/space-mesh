@@ -346,6 +346,11 @@ RustBuffer uniffi_space_ffi_fn_method_scanhandle_stale_files(void*_Nonnull ptr, 
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_stats(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_SUGGESTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_SUGGESTIONS
+RustBuffer uniffi_space_ffi_fn_method_scanhandle_suggestions(void*_Nonnull ptr, uint64_t idle_days, uint64_t min_bytes, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_TOP_FILES
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_METHOD_SCANHANDLE_TOP_FILES
 RustBuffer uniffi_space_ffi_fn_method_scanhandle_top_files(void*_Nonnull ptr, uint32_t limit, RustCallStatus *_Nonnull out_status
@@ -397,9 +402,34 @@ void*_Nonnull uniffi_space_ffi_fn_func_load_snapshot(RustBuffer db_path, RustBuf
 RustBuffer uniffi_space_ffi_fn_func_load_snapshot_state(RustBuffer db_path, RustBuffer root_path, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_MERGE_DUPLICATES
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_MERGE_DUPLICATES
+RustBuffer uniffi_space_ffi_fn_func_merge_duplicates(RustBuffer keep, RustBuffer victims, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_OPEN_DIFF
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_OPEN_DIFF
 void*_Nonnull uniffi_space_ffi_fn_func_open_diff(RustBuffer db_path, int64_t old_id, int64_t new_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_ADD
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_ADD
+int64_t uniffi_space_ffi_fn_func_reclaim_log_add(RustBuffer db_path, RustBuffer root_path, uint64_t item_count, uint64_t estimated, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_LIST
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_LIST
+RustBuffer uniffi_space_ffi_fn_func_reclaim_log_list(RustBuffer db_path, RustBuffer root_path, uint32_t limit, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_SET_MEASURED
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_SET_MEASURED
+void uniffi_space_ffi_fn_func_reclaim_log_set_measured(RustBuffer db_path, int64_t id, int64_t measured, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_SET_UNDONE
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_RECLAIM_LOG_SET_UNDONE
+void uniffi_space_ffi_fn_func_reclaim_log_set_undone(RustBuffer db_path, int64_t id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_FN_FUNC_SCAN_AND_SAVE
@@ -763,9 +793,39 @@ uint16_t uniffi_space_ffi_checksum_func_load_snapshot_state(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_MERGE_DUPLICATES
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_MERGE_DUPLICATES
+uint16_t uniffi_space_ffi_checksum_func_merge_duplicates(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_OPEN_DIFF
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_OPEN_DIFF
 uint16_t uniffi_space_ffi_checksum_func_open_diff(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_ADD
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_ADD
+uint16_t uniffi_space_ffi_checksum_func_reclaim_log_add(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_LIST
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_LIST
+uint16_t uniffi_space_ffi_checksum_func_reclaim_log_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_SET_MEASURED
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_SET_MEASURED
+uint16_t uniffi_space_ffi_checksum_func_reclaim_log_set_measured(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_SET_UNDONE
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_FUNC_RECLAIM_LOG_SET_UNDONE
+uint16_t uniffi_space_ffi_checksum_func_reclaim_log_set_undone(void
     
 );
 #endif
@@ -886,6 +946,12 @@ uint16_t uniffi_space_ffi_checksum_method_scanhandle_stale_files(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_STATS
 #define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_STATS
 uint16_t uniffi_space_ffi_checksum_method_scanhandle_stats(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_SUGGESTIONS
+#define UNIFFI_FFIDEF_UNIFFI_SPACE_FFI_CHECKSUM_METHOD_SCANHANDLE_SUGGESTIONS
+uint16_t uniffi_space_ffi_checksum_method_scanhandle_suggestions(void
     
 );
 #endif
