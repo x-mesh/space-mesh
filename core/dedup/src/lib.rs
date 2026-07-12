@@ -3,6 +3,10 @@
 //! ① 크기 그룹핑(유일 크기는 즉시 탈락) → ② 헤드+테일 4KiB 부분 해시 →
 //! ③ 생존 후보만 blake3 전체 해시. 하드링크는 scanner가 기록 단계에서 이미 1회로
 //! 접어두므로 같은 그룹에 중복 등장하지 않는다.
+//!
+//! F3: APFS clonefile로 이미 블록을 공유하는 쌍은 지워도 공간이 늘지 않는다 —
+//! 물리 익스텐트로 그걸 알아내 회수량을 부풀리지 않고(clone_shared), 삭제 대신
+//! 무손실 회수(merge_as_clone)를 제공한다.
 
 use rayon::prelude::*;
 use space_scanner::{scan_with_progress, DirNode, FileEntry, ScanOptions};
@@ -18,9 +22,13 @@ const PARTIAL_CHUNK: usize = 4096;
 pub struct DupGroup {
     /// 그룹 내 파일 한 개의 크기 (모두 동일).
     pub file_size: u64,
-    /// 하나만 남기고 지웠을 때 회수되는 공간.
+    /// 하나만 남기고 지웠을 때 **실제로** 회수되는 공간.
+    /// 이미 블록을 공유하는(APFS 클론) 사본은 지워도 안 늘어나므로 세지 않는다.
     pub reclaimable: u64,
     pub hash_hex: String,
+    /// 그룹 안에 이미 블록을 공유하는 쌍이 있다 (F3). 사용자가 "왜 지웠는데
+    /// 공간이 안 늘지"를 겪기 전에 미리 말해줘야 하는 사실.
+    pub clone_shared: bool,
     /// 첫 번째 = 보존 추천본(최신 mtime, 동률이면 경로순 첫 파일).
     /// 나머지는 경로순 — UI/CLI의 "첫 파일만 남기고 정리" 관례와 결합된다.
     pub files: Vec<PathBuf>,
@@ -157,10 +165,26 @@ fn dedup_candidates(files: Vec<FileEntry>, progress: Option<Arc<AtomicU64>>) -> 
                         v.insert(0, e);
                     }
                     let size = v[0].logical_size;
+                    // 서로 다른 물리 익스텐트가 몇 개인가 — 같은 첫 블록을 가리키면
+                    // 이미 클론이라 지워도 공간이 안 늘어난다. 물리 오프셋을 못 읽는
+                    // 파일(비-APFS 등)은 보수적으로 각자 독립으로 센다.
+                    let mut seen_extents = std::collections::HashSet::new();
+                    let mut unique: u64 = 0;
+                    for e in &v {
+                        match first_block_phys(&e.path) {
+                            Some(off) => {
+                                if seen_extents.insert(off) {
+                                    unique += 1;
+                                }
+                            }
+                            None => unique += 1,
+                        }
+                    }
                     DupGroup {
                         file_size: size,
-                        reclaimable: v[0].allocated_size * (v.len() as u64 - 1),
+                        reclaimable: v[0].allocated_size * unique.saturating_sub(1),
                         hash_hex: hash.to_hex().to_string(),
+                        clone_shared: unique < v.len() as u64,
                         files: v.into_iter().map(|e| e.path).collect(),
                     }
                 })
@@ -209,6 +233,202 @@ fn full_hash(path: &Path) -> std::io::Result<blake3::Hash> {
     let mut hasher = blake3::Hasher::new();
     hasher.update_mmap_rayon(path)?;
     Ok(hasher.finalize())
+}
+
+// ───────────────────────── F3: APFS 클론 인식 + 무손실 병합 ─────────────────────────
+
+/// 첫 블록의 물리 오프셋. 두 파일이 같은 값이면 이미 블록을 공유한다(클론).
+/// 읽을 수 없으면 None — 호출자는 "공유 아님"으로 보수적으로 처리한다.
+#[cfg(target_os = "macos")]
+fn first_block_phys(path: &Path) -> Option<u64> {
+    use std::os::fd::AsRawFd;
+    // sys/fcntl.h: F_LOG2PHYS = 49.
+    //
+    // struct log2phys는 `#pragma pack(4)`라 sizeof == 20이다 (u32 뒤에 패딩이
+    // 없다). 평범한 #[repr(C)]로 쓰면 Rust가 8바이트 정렬 패딩을 넣어 24바이트가
+    // 되고, 커널이 offset 12에 쓴 devoffset을 offset 16에서 읽게 된다 — 모든
+    // 파일이 같은 쓰레기 값을 돌려받아 "전부 블록 공유"로 오판한다.
+    #[repr(C, packed(4))]
+    struct Log2Phys {
+        l2p_flags: u32,
+        l2p_contigbytes: i64,
+        l2p_devoffset: i64,
+    }
+    const F_LOG2PHYS: libc::c_int = 49;
+    debug_assert_eq!(std::mem::size_of::<Log2Phys>(), 20);
+
+    let f = File::open(path).ok()?;
+    let mut l2p = Log2Phys {
+        l2p_flags: 0,
+        l2p_contigbytes: 0,
+        l2p_devoffset: 0,
+    };
+    let rc = unsafe { libc::fcntl(f.as_raw_fd(), F_LOG2PHYS, &mut l2p) };
+    // packed 필드는 참조를 뜰 수 없다 — 값으로 복사해서 본다.
+    let devoffset = l2p.l2p_devoffset;
+    if rc == -1 || devoffset < 0 {
+        return None;
+    }
+    Some(devoffset as u64)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn first_block_phys(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// merge_group 결과 집계.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MergeStats {
+    pub merged: u32,
+    pub failed: u32,
+    /// 회수 추정치 상한 (victim들이 점유하던 블록 합).
+    pub reclaimed: u64,
+}
+
+/// 그룹 병합: victims를 keep의 클론 사본으로 순차 교체한다.
+/// keep은 배치 시작 시 한 번만 해시하고 각 victim만 재해시한다 —
+/// N개 victim에 keep을 N번 다시 읽는 낭비를 없앤다.
+pub fn merge_group(keep: &Path, victims: &[PathBuf]) -> MergeStats {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = keep;
+        MergeStats {
+            failed: victims.len() as u32,
+            ..Default::default()
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let keep_hash = match full_hash(keep) {
+            Ok(h) => h,
+            Err(_) => {
+                return MergeStats {
+                    failed: victims.len() as u32,
+                    ..Default::default()
+                }
+            }
+        };
+        let mut stats = MergeStats::default();
+        for victim in victims {
+            match merge_one(keep, &keep_hash, victim) {
+                Ok(bytes) => {
+                    stats.merged += 1;
+                    stats.reclaimed += bytes;
+                }
+                Err(_) => stats.failed += 1,
+            }
+        }
+        stats
+    }
+}
+
+/// victim을 keep의 APFS 클론 사본으로 교체해 데이터 손실 없이 공간을 회수한다.
+/// 반환: 회수 추정치(victim이 점유하던 블록, 상한). 배치는 merge_group 사용.
+pub fn merge_as_clone(keep: &Path, victim: &Path) -> std::io::Result<u64> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (keep, victim);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "clonefile requires APFS (macOS)",
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let keep_hash = full_hash(keep)?;
+        merge_one(keep, &keep_hash, victim)
+    }
+}
+
+/// 안전 절차: ① victim을 다시 전체 해시해 keep 해시와 동일성 재확인(TOCTOU 방지)
+/// → ② 같은 디렉토리에 임시 이름으로 clonefile → ③ victim의 권한·mtime을 임시
+/// 파일에 복사 → ④ rename으로 원자적 교체. 실패 시 어느 단계에서든 victim 무손상.
+/// victim에 다른 하드링크가 있으면 거부한다 — rename이 링크 쌍을 조용히 끊는 데다
+/// 쌍이 inode를 붙들고 있어 회수도 0이기 때문.
+#[cfg(target_os = "macos")]
+fn merge_one(keep: &Path, keep_hash: &blake3::Hash, victim: &Path) -> std::io::Result<u64> {
+    use std::ffi::CString;
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    extern "C" {
+        fn clonefile(src: *const libc::c_char, dst: *const libc::c_char, flags: u32)
+            -> libc::c_int;
+    }
+
+    if keep == victim {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "keep and victim are the same path",
+        ));
+    }
+    let victim_md = fs::symlink_metadata(victim)?;
+    let keep_md = fs::symlink_metadata(keep)?;
+    if !victim_md.is_file() || !keep_md.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "merge targets must be regular files",
+        ));
+    }
+    if victim_md.nlink() > 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "victim has other hardlinks — merging would sever them and reclaim nothing",
+        ));
+    }
+    // ① 내용 동일성 재확인 — 탐지 이후 파일이 바뀌었으면 거부.
+    if *keep_hash != full_hash(victim)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "files differ — refusing to merge",
+        ));
+    }
+    // 이미 블록을 공유하면 할 일 없음.
+    if let (Some(a), Some(b)) = (first_block_phys(keep), first_block_phys(victim)) {
+        if a == b {
+            return Ok(0);
+        }
+    }
+    let reclaim = victim_md.blocks() * 512;
+    let parent = victim.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "victim has no parent dir")
+    })?;
+    let tmp = parent.join(format!(".space-mesh-clone-{}", std::process::id()));
+    let _ = fs::remove_file(&tmp);
+
+    // ② clonefile — 크로스 볼륨/비-APFS면 여기서 실패한다 (victim 무손상).
+    let src = CString::new(keep.as_os_str().as_bytes())?;
+    let dst = CString::new(tmp.as_os_str().as_bytes())?;
+    if unsafe { clonefile(src.as_ptr(), dst.as_ptr(), 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // ③+④ 메타데이터 복사 후 원자적 교체 — 실패 시 임시 파일만 지운다.
+    let result = (|| -> std::io::Result<()> {
+        fs::set_permissions(&tmp, victim_md.permissions())?;
+        let times = [
+            libc::timeval {
+                tv_sec: victim_md.atime() as libc::time_t,
+                tv_usec: 0,
+            },
+            libc::timeval {
+                tv_sec: victim_md.mtime() as libc::time_t,
+                tv_usec: 0,
+            },
+        ];
+        let tmp_c = CString::new(tmp.as_os_str().as_bytes())?;
+        if unsafe { libc::utimes(tmp_c.as_ptr(), times.as_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        fs::rename(&tmp, victim)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result?;
+    Ok(reclaim)
 }
 
 #[cfg(test)]
@@ -347,6 +567,64 @@ mod tests {
         assert!(result.groups.is_empty());
         // 부분해시 단계까지는 후보로 살아남았어야 한다 (필터가 실제로 동작했는지 확인).
         assert_eq!(result.stats.partial_hashed, 2);
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn merge_as_clone_refuses_or_reclaims() {
+        let tmp = std::env::temp_dir().join(format!("space-dedup-clone-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("keep.bin"), vec![7u8; 20_000]).unwrap();
+        fs::write(tmp.join("victim.bin"), vec![7u8; 20_000]).unwrap();
+        fs::write(tmp.join("other.bin"), vec![8u8; 20_000]).unwrap();
+
+        // 내용이 다른 파일 병합은 어떤 플랫폼에서든 반드시 거부되어야 한다.
+        let bad = merge_as_clone(&tmp.join("keep.bin"), &tmp.join("other.bin"));
+        assert!(bad.is_err());
+        // 거부 후 원본 무손상.
+        assert_eq!(fs::read(tmp.join("other.bin")).unwrap(), vec![8u8; 20_000]);
+
+        let same = merge_as_clone(&tmp.join("keep.bin"), &tmp.join("victim.bin"));
+        if cfg!(target_os = "macos") {
+            // APFS면 성공하고 내용이 보존된다 (tmpdir이 APFS가 아니면 에러 허용).
+            if let Ok(reclaimed) = same {
+                assert!(reclaimed > 0);
+                assert_eq!(fs::read(tmp.join("victim.bin")).unwrap(), vec![7u8; 20_000]);
+            }
+        } else {
+            // 비-macOS는 Unsupported.
+            assert_eq!(same.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+        }
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// 클론 쌍은 지워도 공간이 안 늘어난다 — reclaimable이 이를 반영해야 한다.
+    /// (예전 계산은 size × (len-1)이라 클론 그룹의 회수량을 통째로 부풀렸다.)
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn cloned_pair_reports_no_reclaimable() {
+        let tmp = std::env::temp_dir().join(format!("space-dedup-shared-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("a.bin"), vec![9u8; 40_000]).unwrap();
+        fs::write(tmp.join("b.bin"), vec![9u8; 40_000]).unwrap();
+
+        // b를 a의 클론으로 만든다. tmpdir이 APFS가 아니면 이 테스트는 의미가 없다.
+        if merge_as_clone(&tmp.join("a.bin"), &tmp.join("b.bin")).is_err() {
+            fs::remove_dir_all(&tmp).unwrap();
+            return;
+        }
+        let result = find_duplicates(&tmp, 1, None).unwrap();
+        let group = result
+            .groups
+            .iter()
+            .find(|g| g.files.len() == 2)
+            .expect("클론이어도 내용이 같으므로 중복 그룹으로는 잡혀야 한다");
+        assert!(group.clone_shared, "블록 공유를 감지하지 못했다");
+        assert_eq!(group.reclaimable, 0, "클론 쌍인데 회수량을 부풀렸다");
 
         fs::remove_dir_all(&tmp).unwrap();
     }

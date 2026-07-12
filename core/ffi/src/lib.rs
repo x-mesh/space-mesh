@@ -541,8 +541,12 @@ pub fn detect_cleanup(home: String) -> Vec<CleanupCandidate> {
 #[derive(uniffi::Record)]
 pub struct DupGroupInfo {
     pub file_size: u64,
+    /// 하나만 남기고 지웠을 때 **실제로** 늘어나는 공간. 이미 블록을 공유하는
+    /// 사본은 세지 않는다 (clone_shared 참조).
     pub reclaimable: u64,
     pub hash_hex: String,
+    /// 이미 APFS 블록을 공유하는 쌍이 있다 (F3) — 지워도 그만큼은 안 늘어난다.
+    pub clone_shared: bool,
     pub files: Vec<String>,
 }
 
@@ -554,6 +558,7 @@ fn to_dup_groups(result: space_dedup::DedupResult) -> Vec<DupGroupInfo> {
             file_size: g.file_size,
             reclaimable: g.reclaimable,
             hash_hex: g.hash_hex,
+            clone_shared: g.clone_shared,
             files: g
                 .files
                 .into_iter()
@@ -1278,6 +1283,31 @@ pub fn list_apps() -> Vec<AppInfo> {
 pub fn app_data_size(bundle_id: String) -> u64 {
     space_rules::apps::app_data_size(&bundle_id)
 }
+
+// ───────────────────────── F3: 클론 병합 (무손실 회수) ─────────────────────────
+
+#[derive(uniffi::Record)]
+pub struct MergeStatsInfo {
+    pub merged: u32,
+    pub failed: u32,
+    pub reclaimed: u64,
+}
+
+/// victims를 keep의 APFS 클론 사본으로 교체한다 — **파일은 그대로 남는다.**
+/// 삭제가 아니라 블록 공유라, 중복이지만 지우기 아까운 사본에 쓴다.
+/// 내용이 다르면 거부하고, 하드링크가 걸린 victim도 거부한다 (core에서 재검증).
+/// 블로킹(전체 해시 재확인) — 백그라운드에서 호출.
+#[uniffi::export]
+pub fn merge_duplicates(keep: String, victims: Vec<String>) -> MergeStatsInfo {
+    let victim_paths: Vec<PathBuf> = victims.into_iter().map(PathBuf::from).collect();
+    let s = space_dedup::merge_group(Path::new(&keep), &victim_paths);
+    MergeStatsInfo {
+        merged: s.merged,
+        failed: s.failed,
+        reclaimed: s.reclaimed,
+    }
+}
+
 // ───────────────────────── 정책 기반 회수 제안 (F6) ─────────────────────────
 
 #[derive(uniffi::Record)]

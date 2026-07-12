@@ -802,6 +802,7 @@ name = "space-dedup"
 version = "0.5.1"
 dependencies = [
  "blake3",
+ "libc",
  "rayon",
  "space-scanner",
 ]

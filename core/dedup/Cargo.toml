@@ -8,3 +8,5 @@ space-scanner = { path = "../scanner" }
 rayon = { workspace = true }
 # mmap+rayon: 대용량 파일 전체 해시를 멀티스레드로 (PERF-002)
 blake3 = { version = "1", features = ["mmap", "rayon"] }
+# F3: F_LOG2PHYS(클론 공유 판정) + clonefile(무손실 병합)
+libc = "0.2"
