@@ -87,6 +87,45 @@ struct SettingsView: View {
 
             Divider().overlay(Theme.border)
 
+            // 회수 제안 정책 (F6) — 계산·알림까지만, 자동 삭제 없음.
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle(isOn: $settings.suggestEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("회수 제안")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Theme.text)
+                        Text(
+                            "감시 중 회수 후보(safe 캐시 + 유휴 프로젝트 산출물)를 계산해 배너·알림으로 제안합니다. 삭제는 항상 직접 확인 후 실행됩니다."
+                        )
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .toggleStyle(.switch)
+                if settings.suggestEnabled {
+                    HStack(spacing: 10) {
+                        InstrumentLabel(text: "유휴 기준")
+                        TextField("일", value: $settings.suggestIdleDays, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 56)
+                        Text("일 이상")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim)
+                        InstrumentLabel(text: "최소 합계")
+                        TextField("GiB", value: $settings.suggestMinGiB, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 56)
+                        Text("GiB 미만이면 조용히")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textDim)
+                    }
+                    .padding(.leading, 4)
+                }
+            }
+
+            Divider().overlay(Theme.border)
+
             HStack(spacing: 6) {
                 if agent.isRecomputing {
                     ProgressView().controlSize(.small)
@@ -99,7 +138,7 @@ struct SettingsView: View {
             Spacer()
         }
         .padding(20)
-        .frame(width: 460, height: 420)
+        .frame(width: 460, height: 560)
         .background(Theme.bg)
         .onChange(of: settings.mode) { agent.apply(settings) }
         .onChange(of: settings.interval) {
@@ -111,6 +150,14 @@ struct SettingsView: View {
         .onChange(of: settings.growthAlertGiB) {
             if settings.mode == .live { agent.apply(settings) }
         }
+        // 제안 설정은 주기 모드 LaunchAgent의 CLI 인자에 실려 나가므로 재설치가 필요하다.
+        .onChange(of: settings.suggestEnabled) { reinstallIfPeriodic() }
+        .onChange(of: settings.suggestIdleDays) { reinstallIfPeriodic() }
+        .onChange(of: settings.suggestMinGiB) { reinstallIfPeriodic() }
+    }
+
+    private func reinstallIfPeriodic() {
+        if settings.mode == .periodic { agent.apply(settings) }
     }
 
     private func modeCard(_ mode: WatchMode) -> some View {

@@ -34,7 +34,8 @@ final class BackgroundAgent: ObservableObject {
         case .off:
             status = "감시 꺼짐"
         case .periodic:
-            installLaunchAgent(root: settings.watchedRoot, interval: settings.interval)
+            installLaunchAgent(
+                root: settings.watchedRoot, interval: settings.interval, settings: settings)
         case .live:
             requestNotificationAuth()
             growthAlertBytes =
@@ -69,14 +70,26 @@ final class BackgroundAgent: ObservableObject {
         return FileManager.default.isExecutableFile(atPath: devPath.path) ? devPath.path : nil
     }
 
-    private func installLaunchAgent(root: String, interval: PeriodicInterval) {
+    private func installLaunchAgent(
+        root: String, interval: PeriodicInterval, settings: AppSettings
+    ) {
         guard let cli = Self.cliPath() else {
             status = "CLI 바이너리를 찾을 수 없어 주기 모드를 설정하지 못했습니다"
             return
         }
+        var argv = [cli, root, "--db", AppModel.dbPath, "--depth", "0"]
+        // 회수 제안 (F6) — CLI가 suggestions.json을 남기고, 앱이 배너로 읽는다.
+        // 삭제는 하지 않는다.
+        if settings.suggestEnabled {
+            argv += [
+                "--suggest",
+                "--suggest-idle-days", String(max(0, settings.suggestIdleDays)),
+                "--suggest-min-mib", String(Int(max(0, settings.suggestMinGiB) * 1024)),
+            ]
+        }
         let plist: [String: Any] = [
             "Label": launchAgentLabel,
-            "ProgramArguments": [cli, root, "--db", AppModel.dbPath, "--depth", "0"],
+            "ProgramArguments": argv,
             "StartInterval": interval.seconds,
             "ProcessType": "Background",  // 저우선순위 스케줄링
             "LowPriorityIO": true,  // 다른 IO를 방해하지 않음

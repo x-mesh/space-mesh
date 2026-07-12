@@ -53,6 +53,7 @@ struct ContentView: View {
     @StateObject private var cleanup = CleanupModel()
     @StateObject private var plan = ReclaimPlan()
     @StateObject private var volume = VolumeStatus()
+    @ObservedObject private var suggestions = SuggestionStore.shared
     @State private var scanTarget = NSHomeDirectory()
     @State private var previewURL: URL?
     @State private var selection: SidebarItem = .treemap
@@ -68,6 +69,11 @@ struct ContentView: View {
                 Rectangle().fill(Theme.border).frame(height: 1)
                 if showFdaBanner {
                     fdaBanner
+                    Rectangle().fill(Theme.border).frame(height: 1)
+                }
+                // 백그라운드가 계산해 둔 회수 제안 (F6) — 제안까지만, 자동 삭제 없음.
+                if let suggestion = suggestions.current, !suggestions.dismissed {
+                    suggestionBanner(suggestion)
                     Rectangle().fill(Theme.border).frame(height: 1)
                 }
                 HStack(spacing: 0) {
@@ -96,9 +102,21 @@ struct ContentView: View {
         .quickLookPreview($previewURL)
         .onAppear {
             volume.refresh(path: scanTarget)
+            // 주기 모드 CLI가 남긴 회수 제안이 있으면 배너로 (F6).
+            suggestions.loadFromDisk()
         }
+        // 스캔이 끝난 시점 = 트리가 최신인 시점. 여기서만 제안을 다시 평가한다
+        // (내부적으로 6시간 쿨다운).
         .onChange(of: model.scanSeconds) {
             volume.refresh(path: scanTarget)
+            guard let handle = model.handle, !model.scannedRoot.isEmpty else { return }
+            Task {
+                if let s = await suggestions.evaluate(
+                    handle: handle, root: model.scannedRoot, settings: .shared)
+                {
+                    suggestions.notifyIfNew(s)
+                }
+            }
         }
     }
 
@@ -264,6 +282,40 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    // MARK: - 회수 제안 배너 (F6)
+
+    private func suggestionBanner(_ suggestion: Suggestion) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.accent)
+            Text(
+                "회수 제안: \(suggestion.items.count)개 항목 · \(humanBytes(suggestion.totalEstimated)) — safe 캐시와 \(suggestion.idleDays)일+ 유휴 프로젝트 산출물"
+            )
+            .font(.system(size: 11.5))
+            .foregroundStyle(Theme.textDim)
+            Spacer()
+            Button("플랜에 담기") {
+                plan.add(suggestion.items.map(PlanItem.init))
+                suggestions.dismissed = true
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.accent)
+            Button {
+                suggestions.dismissed = true
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(Theme.textFaint)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Theme.panel)
     }
 
     // MARK: - Full Disk Access 안내 (F9)
