@@ -70,6 +70,8 @@ pub struct ScanStatsInfo {
     pub total_files: u64,
     pub total_dirs: u64,
     pub errors: u64,
+    /// errors 중 권한 거부 몫 — 앱이 전체 디스크 접근 안내를 띄울지 판단한다.
+    pub permission_errors: u64,
 }
 
 #[derive(uniffi::Object)]
@@ -186,6 +188,7 @@ impl ScanHandle {
             total_files: self.stats.total_files,
             total_dirs: self.stats.total_dirs,
             errors: self.stats.errors,
+            permission_errors: self.stats.permission_errors,
         }
     }
 }
@@ -228,6 +231,7 @@ pub fn scan_path(path: String, min_file_mib: u64) -> Result<Arc<ScanHandle>, Sca
             total_files: result.stats.total_files,
             total_dirs: result.stats.total_dirs,
             errors: result.stats.errors,
+            permission_errors: result.stats.permission_errors,
         },
         root: result.root,
         hardlinks: Some(result.hardlinks),
@@ -258,7 +262,9 @@ pub fn load_snapshot_state(db_path: String, root_path: String) -> Result<Snapsho
             stats: ScanStatsInfo {
                 total_files: meta.total_files,
                 total_dirs: meta.total_dirs,
+                // 스냅샷은 에러 카운트를 보존하지 않는다 — 캐시 로드분은 0으로 둔다.
                 errors: 0,
+                permission_errors: 0,
             },
             root,
             hardlinks,
@@ -316,6 +322,7 @@ fn scan_and_save_impl(
             total_files: result.stats.total_files,
             total_dirs: result.stats.total_dirs,
             errors: result.stats.errors,
+            permission_errors: result.stats.permission_errors,
         },
         root: result.root,
         hardlinks: Some(result.hardlinks),
@@ -375,6 +382,7 @@ impl ScanHandle {
         let mut root = self.root.clone(); // 실측 ~10ms @ 217k dirs (M1 스파이크)
         let mut stats = space_scanner::ScanStats {
             errors: self.stats.errors,
+            permission_errors: self.stats.permission_errors,
             total_files: self.stats.total_files,
             total_dirs: self.stats.total_dirs,
         };
@@ -406,6 +414,7 @@ impl ScanHandle {
                 total_files: stats.total_files,
                 total_dirs: stats.total_dirs,
                 errors: stats.errors,
+                permission_errors: stats.permission_errors,
             },
             root,
             hardlinks: Some(registry),
@@ -437,6 +446,7 @@ impl ScanHandle {
                 total_files: result.stats.total_files,
                 total_dirs: result.stats.total_dirs,
                 errors: result.stats.errors,
+                permission_errors: result.stats.permission_errors,
             },
             root: result.root,
             hardlinks: Some(result.hardlinks),
@@ -461,6 +471,7 @@ impl ScanHandle {
             root: self.root.clone(),
             stats: space_scanner::ScanStats {
                 errors: self.stats.errors,
+                permission_errors: self.stats.permission_errors,
                 total_files: self.stats.total_files,
                 total_dirs: self.stats.total_dirs,
             },

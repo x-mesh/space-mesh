@@ -180,6 +180,7 @@ pub fn rescan_and_merge(
     replace_child(root, node_comps, sub.root);
     apply_ancestor_delta(root, &node_comps[..node_comps.len() - 1], dl, da, df, dd);
     stats.errors += sub.stats.errors;
+    stats.permission_errors += sub.stats.permission_errors;
     refresh_stats(root, stats);
 
     Ok(MergeVerdict::Merged {
@@ -338,6 +339,7 @@ mod tests {
         let mut root = base.root.clone();
         let mut stats = ScanStats {
             errors: base.stats.errors,
+            permission_errors: base.stats.permission_errors,
             total_files: base.stats.total_files,
             total_dirs: base.stats.total_dirs,
         };

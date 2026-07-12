@@ -72,6 +72,8 @@ pub struct FileEntry {
 pub struct ScanStats {
     /// 읽기 실패(권한 등)로 건너뛴 항목 수.
     pub errors: u64,
+    /// errors 중 권한 거부로 건너뛴 수 — 전체 디스크 접근을 켜면 사라지는 몫이다.
+    pub permission_errors: u64,
     pub total_files: u64,
     pub total_dirs: u64,
 }
@@ -136,10 +138,20 @@ struct Ctx {
     /// preseen 스킵 시의 관측 크기 기록 — (d)비소유자 경로 수정 감지용.
     preseen_hits: DashMap<(u64, u64), (u64, u64)>,
     errors: AtomicU64,
+    permission_errors: AtomicU64,
     total_files: AtomicU64,
     total_dirs: AtomicU64,
     /// 외부(UI)에서 폴링하는 라이브 진행 카운터 (스캔한 파일 수).
     progress: Option<Arc<AtomicU64>>,
+}
+
+impl Ctx {
+    fn record_err(&self, e: &std::io::Error) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            self.permission_errors.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// 루트 경로를 병렬 스캔해 디렉토리 트리를 반환한다.
@@ -177,6 +189,7 @@ pub(crate) fn scan_internal(
         preseen,
         preseen_hits: DashMap::new(),
         errors: AtomicU64::new(0),
+        permission_errors: AtomicU64::new(0),
         total_files: AtomicU64::new(0),
         total_dirs: AtomicU64::new(0),
         progress,
@@ -190,6 +203,7 @@ pub(crate) fn scan_internal(
         root: node,
         stats: ScanStats {
             errors: ctx.errors.load(Ordering::Relaxed),
+            permission_errors: ctx.permission_errors.load(Ordering::Relaxed),
             total_files: ctx.total_files.load(Ordering::Relaxed),
             total_dirs: ctx.total_dirs.load(Ordering::Relaxed),
         },
@@ -210,8 +224,8 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
 
     let entries = match fs::read_dir(path) {
         Ok(e) => e,
-        Err(_) => {
-            ctx.errors.fetch_add(1, Ordering::Relaxed);
+        Err(e) => {
+            ctx.record_err(&e);
             return DirNode {
                 name,
                 logical_size: logical,
@@ -245,8 +259,8 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
                         break;
                     }
                 }
-                Err(_) => {
-                    ctx.errors.fetch_add(1, Ordering::Relaxed);
+                Err(e) => {
+                    ctx.record_err(&e);
                 }
             }
         }
@@ -254,24 +268,30 @@ fn scan_dir(path: &Path, name: String, dir_md: &fs::Metadata, ctx: &Ctx) -> DirN
             break;
         }
         if buf.len() >= PAR_LSTAT_MIN_ENTRIES {
-            let results: Vec<Option<Scanned>> = buf
+            // Err(bool)의 bool은 "권한 거부였나" — io::Error는 Send가 아닌 자료를
+            // 물고 있을 필요가 없어, 집계에 필요한 한 비트만 병렬 경계 밖으로 옮긴다.
+            let results: Vec<Result<Scanned, bool>> = buf
                 .par_drain(..)
-                .map(|e| {
-                    let md = e.metadata().ok()?;
-                    Some(classify(e, md, threshold))
+                .map(|e| match e.metadata() {
+                    Ok(md) => Ok(classify(e, md, threshold)),
+                    Err(err) => Err(err.kind() == std::io::ErrorKind::PermissionDenied),
                 })
                 .collect();
-            let failed = results.iter().filter(|r| r.is_none()).count() as u64;
+            let failed = results.iter().filter(|r| r.is_err()).count() as u64;
             if failed > 0 {
+                let denied = results.iter().filter(|r| matches!(r, Err(true))).count() as u64;
                 ctx.errors.fetch_add(failed, Ordering::Relaxed);
+                if denied > 0 {
+                    ctx.permission_errors.fetch_add(denied, Ordering::Relaxed);
+                }
             }
             chunk.extend(results.into_iter().flatten());
         } else {
             for e in buf.drain(..) {
                 match e.metadata() {
                     Ok(md) => chunk.push(classify(e, md, threshold)),
-                    Err(_) => {
-                        ctx.errors.fetch_add(1, Ordering::Relaxed);
+                    Err(err) => {
+                        ctx.record_err(&err);
                     }
                 }
             }
