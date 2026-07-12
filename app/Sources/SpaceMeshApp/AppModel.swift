@@ -22,18 +22,59 @@ final class AppModel: ObservableObject {
     /// 회수 가능 합계 (툴바 상시 노출용, git 조회 없는 경량 계산).
     @Published var reclaimSummary: ReclaimSummary?
     @Published var stats: ScanStatsInfo?
-    /// 루트 전체가 점유한 allocated 총량 — 상단 헤드라인 리드아웃(드릴다운과 무관하게 고정).
+    /// 스캔한 루트가 점유한 allocated 총량 — 디스크 사용량이 아니라 **스캔 범위**의 크기다.
+    /// 프로젝트 폴더 하나를 스캔하면 이 값도 그 폴더 크기일 뿐이다.
     @Published var rootAllocated: UInt64 = 0
     @Published var scanSeconds: Double?
     @Published var scanStartedAt = Date()
     /// 마지막으로 스캔한 루트 경로 (카테고리 뷰의 캐시 무효화 기준).
     @Published var scannedRoot: String = ""
 
+    /// 스캔 루트가 올라앉은 볼륨의 실제 용량과 남은 공간.
+    ///
+    /// 이게 없으면 툴바가 스캔 범위(예: 45 GiB)를 디스크 사용량인 양 보여주게 된다 —
+    /// 실제로는 765 GB를 쓰고 있는데. "얼마나 비워야 하나"에 답하려면 분모가 필요하다.
+    @Published var volumeTotal: UInt64 = 0
+    @Published var volumeFree: UInt64 = 0
+    @Published var volumeUsed: UInt64 = 0
+
+    /// 스캔 범위가 디스크 사용량의 몇 퍼센트인지. 볼륨을 못 읽으면 nil.
+    var scanCoverage: Double? {
+        guard volumeUsed > 0, rootAllocated > 0 else { return nil }
+        return min(1.0, Double(rootAllocated) / Double(volumeUsed))
+    }
+
+    /// 스캔 루트가 속한 볼륨을 조회한다. 실패하면 0으로 남겨 UI가 표시를 접는다 —
+    /// 모르는 값을 지어내느니 안 보여주는 편이 낫다.
+    func refreshVolume(path: String) {
+        let url = URL(fileURLWithPath: path)
+        guard
+            let values = try? url.resourceValues(forKeys: [
+                .volumeTotalCapacityKey,
+                .volumeAvailableCapacityForImportantUsageKey,
+            ]),
+            let total = values.volumeTotalCapacity,
+            let available = values.volumeAvailableCapacityForImportantUsage
+        else {
+            volumeTotal = 0
+            volumeFree = 0
+            volumeUsed = 0
+            return
+        }
+        // volumeAvailableCapacityForImportantUsage는 purgeable 공간까지 포함한 "실제로 쓸 수 있는" 값이라
+        // Finder가 보여주는 여유 공간과 일치한다.
+        volumeTotal = UInt64(max(0, total))
+        volumeFree = UInt64(max(0, available))
+        volumeUsed = volumeTotal > volumeFree ? volumeTotal - volumeFree : 0
+    }
+
     func startScan(path: String) {
         guard !isScanning else { return }
         isScanning = true
         errorMessage = nil
         scanSeconds = nil
+        // 스캔 결과가 나오기 전에 분모부터 잡아둔다 — 볼륨 조회는 즉시 끝난다.
+        refreshVolume(path: path)
         let started = Date()
         scanStartedAt = started
         Task {
@@ -51,7 +92,7 @@ final class AppModel: ObservableObject {
                     handle.reclaimSummary()
                 }.value
             } catch {
-                self.errorMessage = "\(error)"
+                self.errorMessage = humanMessage(for: error)
             }
             self.isScanning = false
         }
@@ -131,7 +172,7 @@ final class AppModel: ObservableObject {
             bigFiles = try handle.bigFilesAt(indexPath: indexPath)
             currentPath = try handle.fullPath(indexPath: indexPath)
         } catch {
-            errorMessage = "\(error)"
+            errorMessage = humanMessage(for: error)
         }
     }
 
@@ -167,4 +208,18 @@ func humanBytes(_ bytes: UInt64) -> String {
         unit += 1
     }
     return unit == 0 ? "\(bytes) B" : String(format: "%.1f %@", value, units[unit])
+}
+
+/// 화면에 띄울 문장. `"\(error)"`로 찍으면 Rust enum 껍데기가 그대로 나온다 —
+/// 사용자가 실제로 본 건 `Io(msg: "No such file or directory (os error 2)")` 였다.
+/// 경로 오타 하나에 os error 번호를 읽힐 이유가 없다.
+func humanMessage(for error: Error) -> String {
+    if let scanError = error as? ScanError {
+        switch scanError {
+        case .Io(let msg): return msg
+        case .Snapshot(let msg): return msg
+        case .InvalidPath: return "경로가 올바르지 않습니다"
+        }
+    }
+    return error.localizedDescription
 }

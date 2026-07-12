@@ -692,6 +692,10 @@ public protocol ScanHandleProtocol: AnyObject, Sendable {
     /**
      * 스캔된 트리에서 잘 알려진 산출물 카테고리(node_modules, cargo target 등)를 찾는다.
      * 트리는 메모리에 있어 즉시 반환된다 (마커 확인만 파일시스템 조회).
+     *
+     * 룰(캐시·도구 화면)이 통째로 세고 있는 영역은 제외한다.
+     * `~/Library/Caches/typescript/5.8/node_modules`를 여기서도 잡으면 같은 2 GB가
+     * 두 화면에 동시에 잡혀, 두 숫자를 더한 사용자가 실제보다 큰 회수량을 기대하게 된다.
      */
     func categories()  -> [CategoryHitInfo]
     
@@ -826,6 +830,10 @@ open func bigFilesAt(indexPath: [UInt32])throws  -> [BigFile]  {
     /**
      * 스캔된 트리에서 잘 알려진 산출물 카테고리(node_modules, cargo target 등)를 찾는다.
      * 트리는 메모리에 있어 즉시 반환된다 (마커 확인만 파일시스템 조회).
+     *
+     * 룰(캐시·도구 화면)이 통째로 세고 있는 영역은 제외한다.
+     * `~/Library/Caches/typescript/5.8/node_modules`를 여기서도 잡으면 같은 2 GB가
+     * 두 화면에 동시에 잡혀, 두 숫자를 더한 사용자가 실제보다 큰 회수량을 기대하게 된다.
      */
 open func categories() -> [CategoryHitInfo]  {
     return try!  FfiConverterSequenceTypeCategoryHitInfo.lift(try! rustCall() {
@@ -3573,7 +3581,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_space_ffi_checksum_method_scanhandle_big_files_at() != 37465) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_space_ffi_checksum_method_scanhandle_categories() != 11247) {
+    if (uniffi_space_ffi_checksum_method_scanhandle_categories() != 60713) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_space_ffi_checksum_method_scanhandle_children() != 43903) {

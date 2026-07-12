@@ -190,16 +190,38 @@ impl ScanHandle {
     }
 }
 
+/// 폴더가 맞는지 먼저 본다.
+///
+/// 없는 경로를 그대로 스캐너에 넘기면 `Io(msg: "No such file or directory (os error 2)")`가
+/// 화면에 그대로 뜬다. 오타 하나에 os error 번호를 읽힐 이유가 없다.
+fn require_dir(path: &Path) -> Result<(), ScanError> {
+    if !path.exists() {
+        return Err(ScanError::Io {
+            msg: format!("경로를 찾을 수 없습니다: {}", path.display()),
+        });
+    }
+    if !path.is_dir() {
+        return Err(ScanError::Io {
+            msg: format!("폴더가 아닙니다: {}", path.display()),
+        });
+    }
+    Ok(())
+}
+
 /// 경로를 스캔해 핸들을 반환한다. 블로킹 — Swift에서 백그라운드 Task로 호출할 것.
 #[uniffi::export]
 pub fn scan_path(path: String, min_file_mib: u64) -> Result<Arc<ScanHandle>, ScanError> {
     let root_path = PathBuf::from(&path);
+    require_dir(&root_path)?;
     let opts = ScanOptions {
         record_file_threshold: min_file_mib * 1024 * 1024,
         ..Default::default()
     };
-    let result = scan_with_progress(&root_path, opts, Some(reset_progress()))
-        .map_err(|e| ScanError::Io { msg: e.to_string() })?;
+    let result = scan_with_progress(&root_path, opts, Some(reset_progress())).map_err(|e| {
+        ScanError::Io {
+            msg: format!("스캔을 끝내지 못했습니다: {e}"),
+        }
+    })?;
     Ok(Arc::new(ScanHandle {
         root_path,
         stats: ScanStatsInfo {
@@ -534,12 +556,16 @@ fn to_dup_groups(result: space_dedup::DedupResult) -> Vec<DupGroupInfo> {
 /// 진행 상황은 scan_progress()로 폴링 (해시 처리 파일 수).
 #[uniffi::export]
 pub fn find_duplicates(root: String, min_size_mib: u64) -> Result<Vec<DupGroupInfo>, ScanError> {
+    let path = Path::new(&root);
+    require_dir(path)?;
     let result = space_dedup::find_duplicates(
-        Path::new(&root),
+        path,
         min_size_mib.max(1) * 1024 * 1024,
         Some(reset_progress()),
     )
-    .map_err(|e| ScanError::Io { msg: e.to_string() })?;
+    .map_err(|e| ScanError::Io {
+        msg: format!("중복 검사를 끝내지 못했습니다: {e}"),
+    })?;
     Ok(to_dup_groups(result))
 }
 
@@ -617,8 +643,16 @@ impl ScanHandle {
 
     /// 스캔된 트리에서 잘 알려진 산출물 카테고리(node_modules, cargo target 등)를 찾는다.
     /// 트리는 메모리에 있어 즉시 반환된다 (마커 확인만 파일시스템 조회).
+    ///
+    /// 룰(캐시·도구 화면)이 통째로 세고 있는 영역은 제외한다.
+    /// `~/Library/Caches/typescript/5.8/node_modules`를 여기서도 잡으면 같은 2 GB가
+    /// 두 화면에 동시에 잡혀, 두 숫자를 더한 사용자가 실제보다 큰 회수량을 기대하게 된다.
     pub fn categories(&self) -> Vec<CategoryHitInfo> {
-        let hits = space_rules::categories::find_categories(&self.root, &self.root_path);
+        let hits = space_rules::categories::find_categories_excluding(
+            &self.root,
+            &self.root_path,
+            &rule_owned_paths(),
+        );
         let idle = space_rules::categories::annotate_idle(&hits);
         hits.into_iter()
             .map(|h| CategoryHitInfo {
@@ -1167,6 +1201,18 @@ fn describe(h: &space_git::RepoHealth) -> (String, u64, bool) {
 #[uniffi::export]
 pub fn git_activity(repo_path: String, weeks: u32) -> Vec<u64> {
     space_git::activity(std::path::Path::new(&repo_path), weeks as u64)
+}
+
+/// 룰(캐시·도구 화면)이 통째로 세고 있는 경로들. 카테고리 탐지는 여기 안으로 들어가지 않는다 —
+/// 같은 바이트를 두 화면에서 각각 세면 합계가 실제 회수량보다 커진다.
+fn rule_owned_paths() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    space_rules::load_rules()
+        .iter()
+        .filter_map(|r| r.path.strip_prefix("~/").map(|rest| home.join(rest)))
+        .collect()
 }
 
 // ───────────────────────── 앱 회계 (/Applications) ─────────────────────────

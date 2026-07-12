@@ -217,15 +217,37 @@ fn match_def(name: &str) -> Option<&'static CategoryDef> {
 /// 스캔된 트리에서 카테고리 히트를 찾는다. 트리는 메모리에 있으므로 빠르고,
 /// 마커 확인만 파일시스템을 조회한다.
 pub fn find_categories(root: &DirNode, root_path: &Path) -> Vec<CategoryHit> {
+    find_categories_excluding(root, root_path, &[])
+}
+
+/// `owned_elsewhere` 아래에 있는 것은 건너뛴다.
+///
+/// `~/Library/Caches/typescript/5.8/node_modules`는 내 프로젝트의 산출물이 아니라
+/// 타입스크립트 도구가 만든 캐시다. 룰(캐시·도구 화면)이 `~/Library/Caches`를 통째로
+/// 세고 있는데 여기서 또 잡으면, 같은 2 GB가 두 화면에 동시에 존재하게 된다.
+/// 도구가 만든 캐시는 도구 화면 소관이다.
+pub fn find_categories_excluding(
+    root: &DirNode,
+    root_path: &Path,
+    owned_elsewhere: &[PathBuf],
+) -> Vec<CategoryHit> {
     let mut hits = Vec::new();
-    walk(root, root_path, &mut hits);
+    walk(root, root_path, owned_elsewhere, &mut hits);
     hits.sort_by_key(|f| std::cmp::Reverse(f.allocated_size));
     hits
 }
 
-fn walk(node: &DirNode, path: &Path, hits: &mut Vec<CategoryHit>) {
+fn walk(node: &DirNode, path: &Path, owned_elsewhere: &[PathBuf], hits: &mut Vec<CategoryHit>) {
     for child in &node.children {
         let child_path = path.join(&child.name);
+        // 룰이 이미 통째로 세고 있는 영역이면 들어가지 않는다 — 같은 바이트를 두 화면에서
+        // 각각 세면 합계가 실제 회수량보다 커진다.
+        if owned_elsewhere
+            .iter()
+            .any(|owned| child_path.starts_with(owned))
+        {
+            continue;
+        }
         if let Some(def) = match_def(&child.name) {
             let verified = def.parent_markers.iter().any(|m| path.join(m).exists())
                 || def
@@ -248,7 +270,7 @@ fn walk(node: &DirNode, path: &Path, hits: &mut Vec<CategoryHit>) {
                 continue;
             }
         }
-        walk(child, &child_path, hits);
+        walk(child, &child_path, owned_elsewhere, hits);
     }
 }
 
@@ -296,6 +318,49 @@ mod tests {
     use super::*;
     use space_scanner::{scan, ScanOptions};
     use std::fs;
+
+    /// ~/Library/Caches/typescript/5.8/node_modules는 룰(캐시·도구 화면)이 이미
+    /// ~/Library/Caches로 통째로 세고 있다. 여기서 또 잡으면 같은 바이트가 두 화면에 산다.
+    #[test]
+    fn excludes_paths_owned_by_rules() {
+        let tmp = std::env::temp_dir().join(format!("cat-owned-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // 룰이 소유하는 캐시 안의 node_modules
+        let cached = tmp.join("Library/Caches/typescript/5.8/node_modules");
+        std::fs::create_dir_all(&cached).unwrap();
+        std::fs::write(cached.join("blob"), vec![0u8; 30_000]).unwrap();
+        std::fs::write(tmp.join("Library/Caches/typescript/5.8/package.json"), "{}").unwrap();
+
+        // 내 프로젝트의 node_modules — 이건 잡혀야 한다
+        let mine = tmp.join("proj/node_modules");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(mine.join("blob"), vec![0u8; 30_000]).unwrap();
+        std::fs::write(tmp.join("proj/package.json"), "{}").unwrap();
+
+        let scanned = space_scanner::scan(
+            &tmp,
+            space_scanner::ScanOptions {
+                record_file_threshold: u64::MAX,
+                one_filesystem: false,
+            },
+        )
+        .unwrap();
+
+        let owned = vec![tmp.join("Library/Caches")];
+        let hits = find_categories_excluding(&scanned.root, &tmp, &owned);
+
+        assert!(
+            hits.iter().any(|h| h.path == mine),
+            "내 프로젝트의 node_modules는 여전히 잡혀야 한다"
+        );
+        assert!(
+            !hits.iter().any(|h| h.path == cached),
+            "룰이 세고 있는 캐시 안의 node_modules를 또 잡으면 이중 계산이다"
+        );
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 
     #[test]
     fn detects_verified_and_skips_unmarked_ambiguous() {

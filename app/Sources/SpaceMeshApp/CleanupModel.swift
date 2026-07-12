@@ -85,7 +85,7 @@ final class CleanupModel: ObservableObject {
                 }
                 self.dupGroups = groups
             } catch {
-                self.message = "중복 검사 실패: \(error)"
+                self.message = "중복 검사 실패 — \(humanMessage(for: error))"
             }
             self.dupSearched = true
             self.isFindingDups = false

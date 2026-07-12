@@ -302,10 +302,22 @@ struct ContentView: View {
 
             if let stats = model.stats, let secs = model.scanSeconds, !model.isScanning {
                 HStack(spacing: 14) {
-                    // 총 사용량 — 헤드라인. 나머지 통계보다 밝고 크게.
-                    readoutItem(
-                        value: humanBytes(model.rootAllocated), label: "USED",
-                        emphasized: true)
+                    // 헤드라인은 "디스크에 얼마나 남았나" — 사용자가 실제로 답을 원하는 질문이다.
+                    // 예전에는 스캔 루트의 크기를 "USED"라고 불렀다. 프로젝트 폴더 하나를 스캔하면
+                    // "45.3 GiB USED"라고 떴는데, 디스크는 실제로 765 GB를 쓰고 있었다.
+                    if model.volumeTotal > 0 {
+                        readoutItem(
+                            value: humanBytes(model.volumeFree), label: "FREE",
+                            emphasized: true
+                        )
+                        .help(
+                            "디스크 \(humanBytes(model.volumeUsed)) 사용 중 / 전체 \(humanBytes(model.volumeTotal))"
+                        )
+                        Rectangle().fill(Theme.border).frame(width: 1, height: 22)
+                    }
+                    // 스캔 범위 — 트리맵이 보여주는 게 디스크 전체가 아님을 분명히 한다.
+                    readoutItem(value: humanBytes(model.rootAllocated), label: "SCANNED")
+                        .help(scanCoverageHelp())
                     Rectangle().fill(Theme.border).frame(width: 1, height: 22)
                     readoutItem(value: stats.totalFiles.formatted(), label: "FILES")
                     readoutItem(value: stats.totalDirs.formatted(), label: "DIRS")
@@ -330,6 +342,19 @@ struct ContentView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(Theme.panel)
+    }
+
+    /// 스캔이 디스크의 얼마를 덮는지. 나머지는 스캔 범위 밖이라 트리맵에 없다.
+    private func scanCoverageHelp() -> String {
+        guard let coverage = model.scanCoverage else {
+            return "스캔한 범위의 크기입니다 (디스크 전체 사용량이 아닙니다)"
+        }
+        let outside = model.volumeUsed > model.rootAllocated
+            ? model.volumeUsed - model.rootAllocated : 0
+        return """
+            스캔 범위: 디스크 사용량의 \(Int(coverage * 100))%
+            나머지 \(humanBytes(outside))는 스캔 밖이라 트리맵에 없습니다
+            """
     }
 
     private func readoutItem(value: String, label: String, emphasized: Bool = false)
