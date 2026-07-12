@@ -51,6 +51,7 @@ private let sidebarGroups: [(title: String, items: [SidebarItem])] = [
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
     @StateObject private var cleanup = CleanupModel()
+    @StateObject private var volume = VolumeStatus()
     @State private var scanTarget = NSHomeDirectory()
     @State private var previewURL: URL?
     @State private var selection: SidebarItem = .treemap
@@ -81,6 +82,12 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .tint(Theme.accent)
         .quickLookPreview($previewURL)
+        .onAppear {
+            volume.refresh(path: scanTarget)
+        }
+        .onChange(of: model.scanSeconds) {
+            volume.refresh(path: scanTarget)
+        }
     }
 
     @ViewBuilder
@@ -282,6 +289,7 @@ struct ContentView: View {
             Button {
                 selection = .treemap
                 model.startScan(path: scanTarget)
+                volume.refresh(path: scanTarget)
             } label: {
                 Text("SCAN")
                     .font(.system(size: 11, weight: .bold))
@@ -313,6 +321,21 @@ struct ContentView: View {
                         .help(
                             "디스크 \(humanBytes(model.volumeUsed)) 사용 중 / 전체 \(humanBytes(model.volumeTotal))"
                         )
+                        // FREE는 purgeable을 포함한 값(Finder 기준)이다. 그중 얼마가 "아직
+                        // 실제로는 안 비워진 보류분"인지 따로 보여준다 — 지웠는데 여유가 안 느는
+                        // 이유가 여기 있다.
+                        if let vol = volume.info, vol.purgeable > 0 {
+                            readoutItem(value: "+" + humanBytes(vol.purgeable), label: "PURGEABLE")
+                                .help(
+                                    "시스템이 필요할 때 자동 회수하는 보류 공간 — 로컬 스냅샷·휴지통 등. FREE에는 이미 포함돼 있지만 아직 실제로 비워지지는 않았습니다"
+                                )
+                        }
+                        if let vol = volume.info, vol.localSnapshots > 0 {
+                            readoutItem(value: "\(vol.localSnapshots)", label: "TM SNAP")
+                                .help(
+                                    "Time Machine 로컬 스냅샷 — tmutil deletelocalsnapshots로 정리할 수 있습니다"
+                                )
+                        }
                         Rectangle().fill(Theme.border).frame(width: 1, height: 22)
                     }
                     // 스캔 범위 — 트리맵이 보여주는 게 디스크 전체가 아님을 분명히 한다.
