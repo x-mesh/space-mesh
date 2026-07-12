@@ -164,6 +164,38 @@ struct DuplicatesView: View {
                         Text(humanBytes(group.reclaimable))
                             .font(.dataCell)
                             .foregroundStyle(Theme.accent)
+                        // F3: 이미 블록을 공유 중이면 지워도 공간이 안 는다 —
+                        // 지우고 나서 알게 되는 것보다 미리 말해주는 편이 낫다.
+                        if group.cloneShared {
+                            TagBadge(text: "클론 공유", color: Theme.info)
+                                .help(
+                                    "이미 APFS 클론으로 블록을 공유하는 파일이 있어, 지워도 그만큼은 공간이 늘지 않습니다 — 위 회수 가능량은 그 몫을 뺀 값입니다"
+                                )
+                        }
+                        Spacer()
+                        // 삭제 대신 무손실 회수 — 파일은 전부 남고 블록만 공유한다.
+                        if group.files.count > 1 && !group.cloneShared {
+                            Button {
+                                model.mergeGroupAsClones(group) {
+                                    model.findDups(
+                                        root: root, minMib: minMib, handle: app.handle,
+                                        scannedRoot: app.scannedRoot)
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.triangle.merge")
+                                        .font(.system(size: 9, weight: .bold))
+                                    Text("클론으로 병합 (무손실)")
+                                        .font(.system(size: 10, weight: .semibold))
+                                }
+                                .foregroundStyle(Theme.accent)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(model.isMerging)
+                            .help(
+                                "파일을 지우지 않고 APFS 블록만 공유시켜 공간을 회수합니다. 모든 사본은 그대로 남습니다."
+                            )
+                        }
                     }
                     .textCase(nil)
                 }

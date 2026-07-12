@@ -28,6 +28,8 @@ final class CleanupModel: ObservableObject {
     @Published var dupStartedAt = Date()
     @Published var selectedDupPaths: Set<String> = []
     @Published var dupSearched = false
+    /// 클론 병합(F3) 진행 중 — 같은 그룹을 두 번 병합하지 않게 막는다.
+    @Published var isMerging = false
 
     // 공식 정리 커맨드 제안
     @Published var advices: [ToolAdviceInfo] = []
@@ -95,6 +97,26 @@ final class CleanupModel: ObservableObject {
             }
             self.dupSearched = true
             self.isFindingDups = false
+        }
+    }
+
+    /// 그룹을 APFS 클론으로 병합한다 (F3) — 삭제가 아니라 블록 공유라 파일은
+    /// 전부 그대로 남는다. 지우기는 아깝지만 공간은 아쉬운 사본을 위한 길.
+    /// 첫 파일(보존 추천본)을 원본으로 삼고 나머지를 그 클론으로 교체한다.
+    func mergeGroupAsClones(_ group: DupGroupInfo, onDone: @escaping @MainActor () -> Void) {
+        guard !isMerging, group.files.count > 1 else { return }
+        isMerging = true
+        let keep = group.files[0]
+        let victims = Array(group.files.dropFirst())
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                mergeDuplicates(keep: keep, victims: victims)
+            }.value
+            self.message =
+                "클론 병합 \(result.merged)개 · 회수 \(humanBytes(result.reclaimed))"
+                + (result.failed > 0 ? " · 실패 \(result.failed) (비-APFS/변경됨)" : "")
+            self.isMerging = false
+            onDone()
         }
     }
 

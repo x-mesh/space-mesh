@@ -49,8 +49,9 @@ enum SelfTest {
             failures.append(contentsOf: testCliPath())
             failures.append(contentsOf: testGitRepos())
             failures.append(contentsOf: testPlanMerge())
+            failures.append(contentsOf: testCloneMerge())
             if failures.isEmpty {
-                print("SELFTEST OK — files=\(stats.totalFiles) dirs=\(stats.totalDirs) root=\(root.allocatedSize)B + cleanup/dedup/trash-undo/plan")
+                print("SELFTEST OK — files=\(stats.totalFiles) dirs=\(stats.totalDirs) root=\(root.allocatedSize)B + cleanup/dedup/trash-undo/plan/clone")
                 exit(0)
             } else {
                 print("SELFTEST FAIL:\n  " + failures.joined(separator: "\n  "))
@@ -345,4 +346,45 @@ enum SelfTest {
         return failures
     }
 
+    /// mergeDuplicates (F3) — 내용이 다르면 거부, 같으면 병합 후에도 두 파일 내용이 보존된다.
+    /// 삭제가 아니라 블록 공유이므로 victim 파일은 사라지지 않아야 한다.
+    private static func testCloneMerge() -> [String] {
+        let fm = FileManager.default
+        let tmp = fm.temporaryDirectory
+            .appendingPathComponent("space-mesh-selftest-clone-\(ProcessInfo.processInfo.processIdentifier)")
+        defer { try? fm.removeItem(at: tmp) }
+        var failures: [String] = []
+        do {
+            try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
+            let same = Data(repeating: 7, count: 100_000)
+            let other = Data(repeating: 8, count: 100_000)
+            let keep = tmp.appendingPathComponent("keep.bin")
+            let victim = tmp.appendingPathComponent("victim.bin")
+            let differ = tmp.appendingPathComponent("differ.bin")
+            try same.write(to: keep)
+            try same.write(to: victim)
+            try other.write(to: differ)
+
+            // 내용이 다르면 반드시 거부하고 원본을 건드리지 않는다.
+            let bad = mergeDuplicates(keep: keep.path, victims: [differ.path])
+            if bad.merged != 0 || bad.failed != 1 {
+                failures.append("clone: 내용이 다른데 병합됨 (merged=\(bad.merged))")
+            }
+            if try Data(contentsOf: differ) != other {
+                failures.append("clone: 거부 후 원본이 훼손됨")
+            }
+
+            // 동일 파일 병합 — APFS면 성공하고, 어느 쪽이든 두 파일 다 남아야 한다.
+            let ok = mergeDuplicates(keep: keep.path, victims: [victim.path])
+            if ok.merged + ok.failed != 1 {
+                failures.append("clone: 결과 집계 오류 (merged=\(ok.merged) failed=\(ok.failed))")
+            }
+            if try Data(contentsOf: victim) != same || Data(contentsOf: keep) != same {
+                failures.append("clone: 병합 후 내용이 바뀜 — 무손실이어야 한다")
+            }
+        } catch {
+            failures.append("clone: \(error)")
+        }
+        return failures
+    }
 }
