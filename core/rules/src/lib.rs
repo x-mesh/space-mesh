@@ -7,6 +7,7 @@
 pub mod advisor;
 pub mod apps;
 pub mod categories;
+pub mod suggest;
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};

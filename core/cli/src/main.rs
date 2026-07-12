@@ -69,6 +69,19 @@ struct Args {
     /// 설치된 도구의 공식 정리 커맨드 제안 출력 (스캔 없음, dry-run 실행)
     #[arg(long)]
     advice: bool,
+
+    /// 스캔 후 회수 제안(F6)을 계산해 suggestions.json으로 쓴다 (--db 옆에).
+    /// 주기 모드 LaunchAgent가 쓰는 경로 — 앱이 배너로 읽어간다. **삭제하지 않는다.**
+    #[arg(long, requires = "db")]
+    suggest: bool,
+
+    /// --suggest에서 유휴로 볼 최소 일수 (git 마지막 커밋 기준)
+    #[arg(long, default_value_t = 90)]
+    suggest_idle_days: u64,
+
+    /// --suggest 합계가 이 값(MiB) 미만이면 항목을 비운다 (소음 방지)
+    #[arg(long, default_value_t = 512)]
+    suggest_min_mib: u64,
 }
 
 fn main() {
@@ -147,6 +160,9 @@ fn main() {
                     }
                 }
                 Err(e) => eprintln!("warning: snapshot save failed: {}", e),
+            }
+            if args.suggest {
+                write_suggestions(&result.root, &args, db_path);
             }
         }
         (
@@ -366,6 +382,37 @@ fn run_dups(args: &Args) {
 }
 
 /// 스캔 트리에서 빌드 산출물 카테고리 히트 출력.
+/// 회수 제안(F6)을 DB 옆의 suggestions.json으로 쓴다 — 앱이 배너로 읽어간다.
+/// 정책은 앱 FFI와 같은 단일 구현(space_rules::suggest)이라 주기 모드와 live
+/// 모드가 같은 디스크에 다른 제안을 내지 않는다. **삭제는 하지 않는다.**
+fn write_suggestions(root: &DirNode, args: &Args, db_path: &std::path::Path) {
+    let home = match std::env::var_os("HOME") {
+        Some(h) => PathBuf::from(h),
+        None => {
+            eprintln!("warning: HOME not set — skipping suggestions");
+            return;
+        }
+    };
+    let s = space_rules::suggest::build(
+        root,
+        &args.path,
+        &home,
+        args.suggest_idle_days,
+        args.suggest_min_mib * 1024 * 1024,
+    );
+    let out = db_path.with_file_name("suggestions.json");
+    match serde_json::to_vec_pretty(&s).map(|b| std::fs::write(&out, b)) {
+        Ok(Ok(())) => eprintln!(
+            "suggestions: {} item(s), {} bytes reclaimable -> {}",
+            s.items.len(),
+            s.total_estimated,
+            out.display()
+        ),
+        Ok(Err(e)) => eprintln!("warning: write {}: {}", out.display(), e),
+        Err(e) => eprintln!("warning: encode suggestions: {}", e),
+    }
+}
+
 fn run_categories(root: &DirNode, args: &Args, elapsed: std::time::Duration) {
     let hits = space_rules::categories::find_categories(root, &args.path);
     let idle = space_rules::categories::annotate_idle(&hits);

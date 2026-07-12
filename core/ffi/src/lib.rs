@@ -1278,6 +1278,68 @@ pub fn list_apps() -> Vec<AppInfo> {
 pub fn app_data_size(bundle_id: String) -> u64 {
     space_rules::apps::app_data_size(&bundle_id)
 }
+// ───────────────────────── 정책 기반 회수 제안 (F6) ─────────────────────────
+
+#[derive(uniffi::Record)]
+pub struct SuggestionItemInfo {
+    /// 화면에 보여줄 대표 위치.
+    pub path: String,
+    /// 실제 삭제 대상 — path와 다를 수 있다. **실행은 반드시 이걸 써야 한다.**
+    pub delete_paths: Vec<String>,
+    pub title: String,
+    /// "rule" | "category"
+    pub source: String,
+    pub safety: String,
+    pub estimated: u64,
+    pub recreate_command: String,
+    pub idle_days: Option<u64>,
+}
+
+#[derive(uniffi::Record)]
+pub struct SuggestionInfo {
+    pub generated_at: u64,
+    pub total_estimated: u64,
+    pub below_threshold: bool,
+    pub items: Vec<SuggestionItemInfo>,
+}
+
+#[uniffi::export]
+impl ScanHandle {
+    /// 정책 기반 회수 제안 — CLI --suggest와 동일한 단일 정책
+    /// (space_rules::suggest). 블로킹(룰 경로 측정 + git 조회) —
+    /// 백그라운드에서 호출. 홈은 $HOME 기준.
+    pub fn suggestions(&self, idle_days: u64, min_bytes: u64) -> SuggestionInfo {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let s =
+            space_rules::suggest::build(&self.root, &self.root_path, &home, idle_days, min_bytes);
+        SuggestionInfo {
+            generated_at: s.generated_at,
+            total_estimated: s.total_estimated,
+            below_threshold: s.below_threshold,
+            items: s
+                .items
+                .into_iter()
+                .map(|i| SuggestionItemInfo {
+                    path: i.path.to_string_lossy().into_owned(),
+                    delete_paths: i
+                        .delete_paths
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                    title: i.title,
+                    source: i.source,
+                    safety: i.safety,
+                    estimated: i.estimated,
+                    recreate_command: i.recreate_command,
+                    idle_days: i.idle_days,
+                })
+                .collect(),
+        }
+    }
+}
+
 // ───────────────────────── 회수 이력 (F1) ─────────────────────────
 
 #[derive(uniffi::Record)]
