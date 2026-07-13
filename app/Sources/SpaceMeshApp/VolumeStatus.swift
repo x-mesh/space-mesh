@@ -57,15 +57,17 @@ final class VolumeStatus: ObservableObject {
             total: UInt64(max(0, total)),
             free: UInt64(max(0, free)),
             freeImportant: UInt64(max(0, important)),
-            localSnapshots: cachedSnapshots ?? countLocalSnapshots()
+            localSnapshots: cachedSnapshots ?? countLocalSnapshots(path: path)
         )
     }
 
-    /// tmutil listlocalsnapshots / 의 스냅샷 줄 수. tmutil 부재/실패 시 0.
-    nonisolated private static func countLocalSnapshots() -> Int {
+    /// tmutil listlocalsnapshots {path}의 스냅샷 줄 수. tmutil 부재/실패 시 0.
+    /// path를 넘겨야 스캔 대상이 부팅 볼륨이 아닐 때(외장 드라이브 등) 그 볼륨의
+    /// 스냅샷을 보여준다 — "/"로 고정하면 항상 시스템 볼륨 수치가 나온다.
+    nonisolated private static func countLocalSnapshots(path: String) -> Int {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/tmutil")
-        proc.arguments = ["listlocalsnapshots", "/"]
+        proc.arguments = ["listlocalsnapshots", path]
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
