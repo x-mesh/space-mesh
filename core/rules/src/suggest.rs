@@ -76,7 +76,10 @@ pub fn build(
     for h in &hits {
         let days = idle.get(&h.project_path).copied();
         // 유휴 판정이 불가능한(git 없는) 프로젝트는 보수적으로 제외.
-        if !h.verified || h.def.safety != "safe" || days.unwrap_or(0) < idle_days {
+        // days.unwrap_or(0) < idle_days였다면 idle_days=0에서 None도 통과해버린다
+        // (0 < 0은 false) — None은 idle_days 값과 무관하게 항상 제외해야 한다.
+        let is_idle_enough = days.is_some_and(|d| d >= idle_days);
+        if !h.verified || h.def.safety != "safe" || !is_idle_enough {
             continue;
         }
         total += h.allocated_size;
@@ -140,6 +143,30 @@ mod tests {
         let quiet = build(&tree, &scan_root, &base.join("home"), 90, u64::MAX);
         assert!(quiet.below_threshold);
         assert!(quiet.items.is_empty());
+
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// idle_days=0("유휴 기준 없음")이어도, git이 없어 유휴 판정 자체가 불가능한
+    /// 프로젝트는 "보수적으로 제외"돼야 한다 — 0 < 0이 false라 예전엔 새지 않고
+    /// 통과됐다.
+    #[test]
+    fn idle_days_zero_still_excludes_projects_without_git() {
+        let base = std::env::temp_dir().join(format!("space-suggest-idle0-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let scan_root = base.join("scan");
+        // rust 프로젝트: Cargo.toml + target → verified safe 히트, git 없음.
+        fs::create_dir_all(scan_root.join("proj/target/debug")).unwrap();
+        fs::write(scan_root.join("proj/Cargo.toml"), "[package]").unwrap();
+        fs::write(scan_root.join("proj/target/debug/bin"), vec![0u8; 9000]).unwrap();
+        let tree = scan(&scan_root, ScanOptions::default()).unwrap().root;
+
+        let s = build(&tree, &scan_root, &base.join("home"), 0, 0);
+        assert!(
+            s.items.iter().all(|i| i.source != "category"),
+            "git 없는 프로젝트가 idle_days=0에서 새어 들어왔다: {:?}",
+            s.items
+        );
 
         fs::remove_dir_all(&base).unwrap();
     }
