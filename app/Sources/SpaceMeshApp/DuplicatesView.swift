@@ -174,7 +174,11 @@ struct DuplicatesView: View {
                         }
                         Spacer()
                         // 삭제 대신 무손실 회수 — 파일은 전부 남고 블록만 공유한다.
-                        if group.files.count > 1 && !group.cloneShared {
+                        // cloneShared는 "그룹 안에 이미 공유된 쌍이 하나라도 있다"는
+                        // 뜻이라, 3개 이상 그룹에서 일부만 공유돼도 나머지는 여전히
+                        // 회수 가능하다 — reclaimable로 게이트한다(이미 공유된 victim은
+                        // core의 merge_one이 물리 오프셋 동일 시 Ok(0)으로 안전하게 스킵).
+                        if group.files.count > 1 && group.reclaimable > 0 {
                             Button {
                                 model.mergeGroupAsClones(group) {
                                     model.findDups(
