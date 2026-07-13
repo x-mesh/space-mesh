@@ -49,6 +49,7 @@ enum SelfTest {
             failures.append(contentsOf: testCliPath())
             failures.append(contentsOf: testGitRepos())
             failures.append(contentsOf: testPlanMerge())
+            failures.append(contentsOf: testPlanExecutePartialFailure())
             failures.append(contentsOf: testCloneMerge())
             if failures.isEmpty {
                 print("SELFTEST OK — files=\(stats.totalFiles) dirs=\(stats.totalDirs) root=\(root.allocatedSize)B + cleanup/dedup/trash-undo/plan/clone")
@@ -342,6 +343,72 @@ enum SelfTest {
         if plan.items.count != 1 || plan.totalEstimated != 500 {
             failures.append(
                 "plan: 중복/합계 오류 (count=\(plan.items.count), total=\(plan.totalEstimated))")
+        }
+
+        // path는 조상/자손 관계지만 deletePaths가 물리적으로 겹치지 않는 두 항목
+        // (예: 부모 룰이 sub3를 제외하고, 다른 룰이 sub3만 담당) — 둘 다 유지돼야
+        // 한다. path 문자열만 보고 지우면 사용자 모르게 회수 기회를 잃는다.
+        let plan2 = ReclaimPlan()
+        let outer = PlanItem(
+            path: "/Users/x/Library/Caches",
+            deletePaths: ["/Users/x/Library/Caches/sub1", "/Users/x/Library/Caches/sub2"],
+            estimatedBytes: 300, source: .rule, safety: "safe", recreateCommand: "")
+        let inner = PlanItem(
+            path: "/Users/x/Library/Caches/sub3",
+            deletePaths: ["/Users/x/Library/Caches/sub3"], estimatedBytes: 200,
+            source: .category, safety: "safe", recreateCommand: "")
+        plan2.add(outer)
+        plan2.add(inner)
+        if plan2.items.count != 2 {
+            failures.append(
+                "plan: deletePaths가 겹치지 않는 자손이 조상에 의해 잘못 제거됨 (\(plan2.items.map(\.path)))"
+            )
+        }
+        return failures
+    }
+
+    /// deletePaths 일부만 이동 성공했을 때 (F1 review-fix) — 남은 경로는 플랜에 그대로
+    /// 남고, 예상치는 성공한 몫만큼만 비례 배분돼야 한다. 통째로 사라지면 재시도할
+    /// 방법이 없고, estimated가 0이면 거짓 편차 경고가 뜬다.
+    @MainActor
+    private static func testPlanExecutePartialFailure() -> [String] {
+        let fm = FileManager.default
+        let dir = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent("space-mesh-selftest-execute-\(ProcessInfo.processInfo.processIdentifier)")
+        let okFile = dir.appendingPathComponent("ok.bin")
+        defer { try? fm.removeItem(at: dir) }
+        var failures: [String] = []
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try Data(repeating: 1, count: 10).write(to: okFile)
+
+            let plan = ReclaimPlan()
+            // 두 deletePaths 중 하나는 홈 밖이라 isSafeToTrash에서 반드시 걸리고,
+            // 하나는 실제로 존재하는 파일이라 반드시 이동에 성공한다 — 부분 실패를
+            // 환경에 기대지 않고 결정적으로 재현한다.
+            let item = PlanItem(
+                path: dir.path, deletePaths: [okFile.path, "/etc/space-mesh-selftest-outside"],
+                estimatedBytes: 1000, source: .category, safety: "safe", recreateCommand: "")
+            plan.add(item)
+            plan.execute(selection: [item.path], appModel: AppModel())
+
+            if plan.items.count != 1 {
+                failures.append(
+                    "plan.execute: 부분 실패인데 남은 경로가 플랜에서 사라짐 (\(plan.items.map(\.path)))"
+                )
+            } else if plan.items[0].deletePaths != ["/etc/space-mesh-selftest-outside"] {
+                failures.append(
+                    "plan.execute: 남은 항목의 deletePaths가 틀림 (\(plan.items[0].deletePaths))")
+            } else if plan.items[0].estimatedBytes != 500 {
+                failures.append(
+                    "plan.execute: 부분 실패 후 estimatedBytes가 비례 배분되지 않음 (\(plan.items[0].estimatedBytes), 기대값 500)"
+                )
+            }
+            if fm.fileExists(atPath: okFile.path) {
+                failures.append("plan.execute: 성공했어야 할 경로가 휴지통으로 이동하지 않음")
+            }
+        } catch {
+            failures.append("plan.execute: \(error)")
         }
         return failures
     }

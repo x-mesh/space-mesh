@@ -89,11 +89,27 @@ final class ReclaimPlan: ObservableObject {
     }
 
     func add(_ item: PlanItem) {
+        // 같은 경로/조상 관계라도 실행 대상(deletePaths)이 물리적으로 겹치지 않으면
+        // 서로 다른 정리 작업이다 — 중첩 룰이 같은 부모 아래 disjoint한 하위집합을
+        // 각자 맡는 경우가 그렇다. path만 보고 지우면 그런 항목을 조용히 잃는다.
+        // (문자열 Set 동일성이 아니라 포함관계로 봐야 한다 — 부모의 deletePaths가
+        // 자손 디렉토리를 통째로 포함하면 실제로는 같은 바이트를 가리킨다.)
+        func overlaps(_ a: PlanItem, _ b: PlanItem) -> Bool {
+            a.deletePaths.contains { p in
+                b.deletePaths.contains { q in
+                    isSameOrDescendant(p, of: q) || isSameOrDescendant(q, of: p)
+                }
+            }
+        }
         // 같은 경로나 조상이 이미 담겨 있으면 무시, 자손이 담겨 있으면 자손을 밀어낸다.
-        if items.contains(where: { isSameOrDescendant(item.path, of: $0.path) }) {
+        if items.contains(where: { isSameOrDescendant(item.path, of: $0.path) && overlaps(item, $0) })
+        {
             return
         }
-        items.removeAll { isSameOrDescendant($0.path, of: item.path) && $0.path != item.path }
+        items.removeAll {
+            isSameOrDescendant($0.path, of: item.path) && $0.path != item.path
+                && overlaps(item, $0)
+        }
         items.append(item)
     }
 
@@ -120,26 +136,44 @@ final class ReclaimPlan: ObservableObject {
         message = nil
 
         // 휴지통 이동 — 즉시 삭제 경로와 같은 공용 엔진(안전 가드 포함).
-        // core는 항목 단위 크기만 주므로, 여러 delete_paths로 쪼개진 항목은
-        // 첫 경로에 예상치를 몰아준다 (배치 합계는 그대로 맞는다).
+        // 항목의 deletePaths 중 일부만 이동에 성공할 수 있다(안전가드/실패로
+        // 일부 스킵). core는 항목 단위 크기만 주고 경로별 실제 크기는 모르므로,
+        // 성공한 경로 수만큼 예상치를 비례 배분하고 나머지 경로는 새 PlanItem으로
+        // 잘라 플랜에 그대로 남긴다 — 통째로 지우면 남은 경로를 재시도할 방법이
+        // 없어지고, 실측과 무관하게 estimated가 0으로 잡혀 거짓 편차 경고를 낸다.
         var batch: [TrashRecord] = []
         var skipped = 0
-        var movedItemPaths: Set<String> = []
+        var estimated: UInt64 = 0
+        var remaining: [PlanItem] = []
+        let targetPaths = Set(targets.map(\.path))
         for item in targets {
-            let sized = item.deletePaths.enumerated().map {
-                (path: $0.element, size: $0.offset == 0 ? item.estimatedBytes : UInt64(0))
-            }
+            let sized = item.deletePaths.map { (path: $0, size: UInt64(0)) }
             let (moved, skip) = moveToTrash(paths: sized)
             batch.append(contentsOf: moved)
             skipped += skip
-            if !moved.isEmpty { movedItemPaths.insert(item.path) }
+
+            let movedSet = Set(moved.map(\.original))
+            let leftover = item.deletePaths.filter { !movedSet.contains($0) }
+            if leftover.isEmpty {
+                estimated += item.estimatedBytes
+            } else if movedSet.isEmpty {
+                remaining.append(item)
+            } else {
+                let movedShare =
+                    item.estimatedBytes * UInt64(movedSet.count) / UInt64(item.deletePaths.count)
+                estimated += movedShare
+                remaining.append(
+                    PlanItem(
+                        path: item.path, deletePaths: leftover,
+                        estimatedBytes: item.estimatedBytes - movedShare,
+                        source: item.source, safety: item.safety,
+                        recreateCommand: item.recreateCommand))
+            }
         }
         lastBatch = batch
-        items.removeAll { movedItemPaths.contains($0.path) }
+        items.removeAll { targetPaths.contains($0.path) }
+        items.append(contentsOf: remaining)
 
-        // 예상치는 실제로 이동된 것 기준 — 보호/실패로 건너뛴 항목이
-        // 예상 vs 실측 비교를 부풀리지 않게 한다.
-        let estimated = batch.reduce(UInt64(0)) { $0 + $1.size }
         let rootPath = appModel.scannedRoot.isEmpty ? NSHomeDirectory() : appModel.scannedRoot
         lastLogId = batch.isEmpty
             ? nil
@@ -166,7 +200,13 @@ final class ReclaimPlan: ObservableObject {
     }
 
     /// 마지막 배치를 휴지통에서 복원하고 트리를 다시 실측한다.
+    ///
+    /// execute()의 검증 재스캔이 도는 동안(isExecuting=true) 되돌리기를 누르면
+    /// 두 verify() 콜백이 경합해 같은 reclaim_log 레코드를 서로 다른 값으로
+    /// 덮어쓴다 — execute()와 같은 가드를 공유한다(트레이 버튼도 disabled).
     func undoLastBatch(appModel: AppModel) {
+        guard !isExecuting else { return }
+        isExecuting = true
         let restored = restoreFromTrash(lastBatch)
         if let logId = lastLogId {
             try? reclaimLogSetUndone(dbPath: AppModel.dbPath, id: logId)
@@ -175,7 +215,9 @@ final class ReclaimPlan: ObservableObject {
         lastBatch = []
         report = nil
         message = "복원: \(restored)개"
-        verify(itemPaths: restoredPaths, appModel: appModel) { _ in }
+        verify(itemPaths: restoredPaths, appModel: appModel) { _ in
+            self.isExecuting = false
+        }
     }
 
     /// 이동/복원된 경로를 증분 재스캔해 루트 집계의 변화를 실측치로 넘긴다.
@@ -268,6 +310,7 @@ struct ReclaimTrayView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .disabled(plan.isExecuting)
             }
             if !plan.items.isEmpty {
                 Button {
