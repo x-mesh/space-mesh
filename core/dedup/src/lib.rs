@@ -395,15 +395,29 @@ fn merge_one(keep: &Path, keep_hash: &blake3::Hash, victim: &Path) -> std::io::R
     let parent = victim.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "victim has no parent dir")
     })?;
-    let tmp = parent.join(format!(".space-mesh-clone-{}", std::process::id()));
-    let _ = fs::remove_file(&tmp);
 
     // ② clonefile — 크로스 볼륨/비-APFS면 여기서 실패한다 (victim 무손상).
-    let src = CString::new(keep.as_os_str().as_bytes())?;
-    let dst = CString::new(tmp.as_os_str().as_bytes())?;
-    if unsafe { clonefile(src.as_ptr(), dst.as_ptr(), 0) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
+    // dst는 존재하지 않아야 clonefile이 성공한다(EEXIST면 실패). pid 기반 이름은
+    // 예측 가능하므로, 무조건 선삭제하는 대신 — 그 이름의 파일이 이미 있으면
+    // (무관한 파일일 수 있다) 지우지 않고 다른 이름으로 재시도한다.
+    let mut attempt = 0u32;
+    let tmp = loop {
+        let candidate = parent.join(if attempt == 0 {
+            format!(".space-mesh-clone-{}", std::process::id())
+        } else {
+            format!(".space-mesh-clone-{}-{}", std::process::id(), attempt)
+        });
+        let src = CString::new(keep.as_os_str().as_bytes())?;
+        let dst = CString::new(candidate.as_os_str().as_bytes())?;
+        if unsafe { clonefile(src.as_ptr(), dst.as_ptr(), 0) } == 0 {
+            break candidate;
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::AlreadyExists || attempt >= 8 {
+            return Err(err);
+        }
+        attempt += 1;
+    };
 
     // ③+④ 메타데이터 복사 후 원자적 교체 — 실패 시 임시 파일만 지운다.
     let result = (|| -> std::io::Result<()> {
