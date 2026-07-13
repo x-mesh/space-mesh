@@ -71,13 +71,24 @@ final class SuggestionStore: ObservableObject {
     }
 
     /// 파일에서 로드 — 앱 시작 시 호출. 7일 넘었거나 비어 있으면 무시.
+    ///
+    /// suggestions.json은 디스크의 외부 입력이다(같은 uid라도 손상/부분쓰기에
+    /// 노출된다). deletePaths가 파일 자신이 적어놓은 root 밖을 가리키는 항목은
+    /// 실행 시트에서 "safe" 기본선택까지 흘러가지 않도록 여기서 걸러낸다.
     func loadFromDisk() {
         guard let data = FileManager.default.contents(atPath: Self.filePath),
             let suggestion = try? JSONDecoder().decode(Suggestion.self, from: data)
         else { return }
         let age = Date().timeIntervalSince1970 - Double(suggestion.generatedAt)
         guard age < 7 * 86_400, !suggestion.items.isEmpty else { return }
-        current = suggestion
+        let safeItems = suggestion.items.filter { item in
+            item.deletePaths.allSatisfy { isSameOrDescendant($0, of: suggestion.root) }
+        }
+        guard !safeItems.isEmpty else { return }
+        current = Suggestion(
+            version: suggestion.version, generatedAt: suggestion.generatedAt,
+            root: suggestion.root, idleDays: suggestion.idleDays,
+            totalEstimated: safeItems.reduce(0) { $0 + $1.estimated }, items: safeItems)
         dismissed = false
     }
 
@@ -93,11 +104,19 @@ final class SuggestionStore: ObservableObject {
         lastEvalAt = Date()
 
         let idleDays = UInt64(max(0, settings.suggestIdleDays))
-        let minBytes = UInt64(max(0, settings.suggestMinGiB) * 1_073_741_824)
+        // settings.suggestMinGiB는 TextField(.number)로 임의의 Double을 받아들인다 —
+        // 표현 범위를 넘는 값을 그대로 UInt64로 캐스팅하면 Swift가 런타임에 트랩한다.
+        let minBytesRaw = max(0, settings.suggestMinGiB) * 1_073_741_824
+        let minBytes = UInt64(min(minBytesRaw, Double(UInt64.max)))
         let info = await Task.detached(priority: .utility) {
             handle.suggestions(idleDays: idleDays, minBytes: minBytes)
         }.value
-        guard !info.belowThreshold, !info.items.isEmpty else { return nil }
+        guard !info.belowThreshold, !info.items.isEmpty else {
+            // 재평가가 임계값 미달/빈 결과로 돌아오면 낡은 제안을 지운다 — 안 그러면
+            // 이미 다른 경로로 정리된 항목의 배너가 계속 남는다.
+            current = nil
+            return nil
+        }
 
         let suggestion = Suggestion(
             version: 1,

@@ -81,10 +81,15 @@ final class BackgroundAgent: ObservableObject {
         // 회수 제안 (F6) — CLI가 suggestions.json을 남기고, 앱이 배너로 읽는다.
         // 삭제는 하지 않는다.
         if settings.suggestEnabled {
+            // suggestMinGiB는 설정 TextField에서 임의의 Double을 받는다 — 표현 범위를
+            // 넘는 값을 그대로 Int로 캐스팅하면 Swift가 트랩해 백그라운드 설정 저장이
+            // 죽는다.
+            let minMibRaw = max(0, settings.suggestMinGiB) * 1024
+            let minMib = Int(min(minMibRaw, Double(Int.max)))
             argv += [
                 "--suggest",
                 "--suggest-idle-days", String(max(0, settings.suggestIdleDays)),
-                "--suggest-min-mib", String(Int(max(0, settings.suggestMinGiB) * 1024)),
+                "--suggest-min-mib", String(minMib),
             ]
         }
         let plist: [String: Any] = [
